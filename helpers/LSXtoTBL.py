@@ -53,7 +53,15 @@ class LSXconvert():
             source_ext = '.lsx'
         if dest_ext is None:
             dest_ext = '.tbl'
+        # Construct the output path, replacing the extension
         out = file.replace(source_ext, dest_ext)
+        # Check if the original path contains "Public" and replace with "Editor" if necessary
+        if os.path.sep + "Public" + os.path.sep in file:
+            # Ensure the Editor/Mods directory exists
+            editor_mods_path = os.path.sep + "Editor" + os.path.sep + "Mods" + os.path.sep
+            editor_path_dir = os.path.dirname(out.replace(os.path.sep + "Public" + os.path.sep, editor_mods_path))
+            os.makedirs(editor_path_dir, exist_ok=True)
+            out = out.replace(os.path.sep + "Public" + os.path.sep, editor_mods_path)
         with open(out, 'w', encoding="utf-8") as f:
             f.write(xmltodict.unparse(data, pretty=True, indent='  '))
         return True
