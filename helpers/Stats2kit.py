@@ -155,10 +155,21 @@ class StatsConvert():
                 if not data[0] in ['SpellType', 'StatusType']:
                     print(f'{Fore.YELLOW}[stats] Missing Pre-Configured Data Type: {data[0]}{Fore.WHITE}')
             if self.db['DataTypes'].get(data[0], '') == "EnumerationListTableFieldDefinition" or self.db['DataTypes'].get(data[0], '') == "EnumerationTableFieldDefinition": # Enum types
-                builder['@enumeration_type_name'] = self.db['DataTypes']['EnumTypes'].get(data[0], data[0])
+                # Special handling for status/spell sheathing fields named the same but different enums
+                if fname.startswith('Status_') and data[0] == 'Sheathing':
+                    enum_type_lookup = f'{data[0]}_Status'
+                else:
+                    enum_type_lookup = data[0]
+                builder['@enumeration_type_name'] = self.db['DataTypes']['EnumTypes'].get(enum_type_lookup, enum_type_lookup)
+
                 builder['@version'] = "1"
                 if not builder['@value'] == '':
                     val = self.db['DataTypes']['EnumSubTypes'].get(builder['@enumeration_type_name'], builder['@value'])
+                    if isinstance(val, dict):
+                        builder['@value'] = val.get(builder['@value'], builder['@value'])
+            if self.db['DataTypes'].get(data[0], '') == "BoolTableFieldDefinition":
+                if not builder['@value'] == '':
+                    val = self.db['DataTypes']['EnumSubTypes'].get('BoolTableFieldDefinition', builder['@value'])
                     if isinstance(val, dict):
                         builder['@value'] = val.get(builder['@value'], builder['@value'])
             return builder
