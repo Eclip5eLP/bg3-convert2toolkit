@@ -125,7 +125,7 @@ class ConvertQThread(QThread):
             self.convert_api.convert(source_path, output_path, False)
 
 
-# thread object to support converting
+# thread object to support compiling auxdb
 class CompileQThread(QThread):
     def __init__(self, parent,
                  convert_api: ConvertAPI):
@@ -234,7 +234,7 @@ class ConverterUIWindow(QMainWindow):
         self.menu_container_widget.setLayout(self.menu_container)
         add_classes(self.menu_container_widget, MENU_STYLE)
 
-        # ui group for input
+        # ui group for source path
         self.convert_container = QHBoxLayout()
         self.convert_container.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self.convert_container.addWidget(self.source_text_input)
