@@ -1,6 +1,6 @@
 ConverterUIWindow {
     min-width: 800px;
-    min-height: 440px;
+    min-height: 490px;
 }
 
 .default {
@@ -24,7 +24,7 @@ DragNDropQLabel.highlight {
 
 QLabel.hint_label {
     font-size: 20px;
-    margin-top: 10px;
+    margin-top: 5px;
 }
 
 QPushButton#convert_button {
@@ -36,4 +36,17 @@ QPushButton#convert_button {
 
 DragNDropQLabel.invalid {
     background-color: #520f00;
+}
+
+QLabel.menu {
+    height: 60px;
+    min-height: 60px;
+}
+
+QPushButton.menu_button {
+    font-size: 14px;
+    margin: 0px;
+    min-height: 40px;
+    max-height: 40px;
+    padding: 0px 10px;
 }

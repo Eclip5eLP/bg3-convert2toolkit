@@ -32,11 +32,20 @@ if __name__ == "__main__":
 		action='store_true',
 		help='force gui mode (overrides settings.json). cannot be used with --cli'
 	)
+	parser.add_argument(
+		'--compileAux',
+		action='store_true',
+		help='Compile additional UUIDs from Editor projects'
+	)
+
 	args = vars(parser.parse_args())
 	if args['cli']:
 		cli_mode = True
 	elif args['gui']:
 		cli_mode = False
+
+	if args['compileAux']:
+		compileAux = True
 
 	# Set up paths for file references (needed due to exe packing)
 	path_to_root = Path('.').resolve()

@@ -277,6 +277,7 @@ Expected file names (note not all types may be supported currently)
 - Source path must be a directory or pak file
   - Does not support converting multiple pak files at once
 - Output path must be a directory
+- `Compile AuxDB` button builds additional UUIDs from Editor projects like compileAux setting 
 
 
 ---
@@ -298,6 +299,7 @@ run `py Convert2Toolkit.py` to start conversion.
 - Put all files/projects you want to convert into folder
 - Run .exe
 - If running .exe from command line you can provide `--cli` or `--gui` to override mode type set in settings.json
+- If running .exe from command line you can provide `--compileAux` to build additional UUIDs from Editor projects
 
 
 ---
