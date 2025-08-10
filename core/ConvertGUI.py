@@ -3,8 +3,14 @@ import sys
 import uuid
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSlot
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import (
+    Qt,
+    QTimer,
+    QThread,
+    pyqtSlot,
+    QUrl
+)
+from PyQt6.QtGui import QIcon, QDesktopServices
 from PyQt6.QtWidgets import (
     QMainWindow,
     QLineEdit,
@@ -13,7 +19,7 @@ from PyQt6.QtWidgets import (
     QWidget,
     QLabel,
     QApplication,
-    QHBoxLayout,
+    QHBoxLayout, QSizePolicy,
 )
 from pyqtwaitingspinner import SpinnerParameters, WaitingSpinner
 
@@ -26,6 +32,8 @@ OUTPUT_STYLE = "output"
 HINT_LABEL = "hint_label"
 INVALID_STYLE = "invalid"
 HIGHLIGHT_STYLE = "highlight"
+MENU_STYLE = "menu"
+MENU_BUTTON_STYLE = "menu_button"
 
 
 def add_classes(element: QWidget, *args):
@@ -117,6 +125,17 @@ class ConvertQThread(QThread):
             self.convert_api.convert(source_path, output_path, False)
 
 
+# thread object to support compiling auxdb
+class CompileQThread(QThread):
+    def __init__(self, parent,
+                 convert_api: ConvertAPI):
+        super().__init__(parent)
+        self.convert_api: ConvertAPI = convert_api
+
+    def run(self):
+        self.convert_api.refresh_aux_db()
+
+
 # timer used for delay before validating source/output fields
 class DebounceQTimer(QTimer):
     def __init__(self,
@@ -156,7 +175,7 @@ class ConverterUIWindow(QMainWindow):
         # main window's name and size:
         self.setWindowTitle("Eclip5e™ Convert2Toolkit")
         self.setWindowIcon(QIcon(str(path_to_resources / 'convert.ico')))
-        self.setGeometry(300, 300, 800, 440)
+        self.setGeometry(300, 300, 800, 490)
 
         # text input for source path
         self.source_text_input = PathQLineEdit(
@@ -179,6 +198,22 @@ class ConverterUIWindow(QMainWindow):
         self.convert_button.clicked.connect(self.run_convert)
         self.enable_convert_button(False)
 
+        # compile aux db button
+        self.compile_button = QPushButton("Compile AuxDB")
+        add_classes(self.compile_button, MENU_BUTTON_STYLE)
+        self.compile_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        self.compile_button.setToolTip("Compile additional UUIDs from Editor projects")
+        # noinspection PyUnresolvedReferences
+        self.compile_button.clicked.connect(self.run_compile_auxdb)
+
+        # github link button
+        self.github_button = QPushButton("GitHub")
+        add_classes(self.github_button, MENU_BUTTON_STYLE)
+        self.github_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        self.github_button.setToolTip("View GitHub Repository")
+        # noinspection PyUnresolvedReferences
+        self.github_button.clicked.connect(self.open_github)
+
         # loading spinner for convert button
         spin_pars = SpinnerParameters(
             disable_parent_when_spinning=True,
@@ -190,7 +225,16 @@ class ConverterUIWindow(QMainWindow):
         )
         self.spinner = WaitingSpinner(self.convert_button, spin_pars)
 
-        # ui group for input and convert button
+        # ui group for menu buttons
+        self.menu_container = QHBoxLayout()
+        self.menu_container.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self.menu_container.addWidget(self.github_button)
+        self.menu_container.addWidget(self.compile_button)
+        self.menu_container_widget = QLabel(self)
+        self.menu_container_widget.setLayout(self.menu_container)
+        add_classes(self.menu_container_widget, MENU_STYLE)
+
+        # ui group for source path
         self.convert_container = QHBoxLayout()
         self.convert_container.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self.convert_container.addWidget(self.source_text_input)
@@ -227,6 +271,7 @@ class ConverterUIWindow(QMainWindow):
         # setup main container for window
         self.main_container = QVBoxLayout()
         self.main_container.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.main_container.addWidget(self.menu_container_widget)
         self.main_container.addWidget(self.convert_info_label)
         self.main_container.addWidget(self.convert_container_widget)
         self.main_container.addWidget(self.output_info_label)
@@ -282,6 +327,7 @@ class ConverterUIWindow(QMainWindow):
 
     def run_convert(self):
         self.spinner.start()
+        self.compile_button.setDisabled(True)
 
         # spawn convert thread for processing
         convert_qthread = ConvertQThread(
@@ -293,10 +339,35 @@ class ConverterUIWindow(QMainWindow):
         convert_qthread.finished.connect(self._convert_finished)
         convert_qthread.start()
 
+    @staticmethod
+    def open_github():
+        url = QUrl("https://github.com/Eclip5eLP/bg3-convert2toolkit")
+        QDesktopServices.openUrl(url)
+
+    def run_compile_auxdb(self):
+        self.spinner.start()
+        self.compile_button.setDisabled(True)
+
+        compile_qthread = CompileQThread(
+            parent=self,
+            convert_api=self.convert_api
+        )
+        compile_qthread.finished.connect(self._compile_auxdb_finished)
+        compile_qthread.start()
+
+
     @pyqtSlot()
     def _convert_finished(self):
         # TODO: may need to do cleanup?  notify user?
         self.spinner.stop()
+        self.compile_button.setDisabled(False)
+
+
+    @pyqtSlot()
+    def _compile_auxdb_finished(self):
+        # TODO: may need to do cleanup?  notify user?
+        self.spinner.stop()
+        self.compile_button.setDisabled(False)
 
 
 # Controlling object for GUI

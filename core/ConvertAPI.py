@@ -24,6 +24,7 @@ class ConvertAPI:
                  compile_aux_db: bool = False):
         self.path_to_root = path_to_root
         self.lslib_util = lslib_util
+        self.src_bg3_path = src_bg3_path
         self._aux_db = self._get_auxiliary_db(src_bg3_path, compile_aux_db)
         self._db = self._get_db()
         self._stats_converter = StatsConvert(self._db, self._aux_db, self.path_to_root)
@@ -123,6 +124,9 @@ class ConvertAPI:
                 projects.append(dir_path)
 
         self._proj_builder.build_all(projects, output_dir, is_cli)
+
+    def refresh_aux_db(self):
+        self._aux_db = self._build_aux_db(self.src_bg3_path)
     #endregion
 
     # region Private helper functions
@@ -133,19 +137,23 @@ class ConvertAPI:
     def _get_auxiliary_db(self, src_bg3_path: str, compile_aux_db: bool) -> dict:
         try:
             if compile_aux_db:
-                # Check if bg3 path valid
-                if not Path(f"{src_bg3_path}/bin/bg3.exe").is_file():
-                    raise FileNotFoundError('')
-
-                compdb = CompileDB(src_bg3_path)
-                print(f'{Fore.YELLOW}[config] bg3.exe found\n[db] Compiling auxiliary ID Database...{Fore.RESET}')
-                return compdb.compileAuxiliaryDB()
+                return self._build_aux_db(src_bg3_path)
             else:
                 print(f'{Fore.YELLOW}[config] bg3.exe found\n[db] Loading auxiliary ID Database...{Fore.RESET}')
                 with open(self.path_to_root / 'auxdb.json', encoding="utf-8") as aux_db_data:
                     return json.load(aux_db_data)
         except FileNotFoundError:
             return {}
+
+    @staticmethod
+    def _build_aux_db(src_bg3_path: str):
+        # Check if bg3 path valid
+        if not Path(f"{src_bg3_path}/bin/bg3.exe").is_file():
+            raise FileNotFoundError('')
+
+        compdb = CompileDB(src_bg3_path)
+        print(f'{Fore.YELLOW}[config] bg3.exe found\n[db] Compiling auxiliary ID Database...{Fore.RESET}')
+        return compdb.compileAuxiliaryDB()
 
     def _get_db(self) -> dict:
         with open(self.path_to_root / 'db.json', encoding="utf-8") as db_data:
