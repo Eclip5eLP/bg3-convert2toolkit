@@ -23,6 +23,9 @@ class LSXconvert():
         },
         'ClassDescriptions': {
             'ParentGuid': 'ParentUUID'
+        },
+        'Races': {
+            'ParentGuid': 'ParentUUID'
         }
     }
 
@@ -51,7 +54,8 @@ class LSXconvert():
     file_type_mappings = {
         'CompanionPresets': {'RootTemplate': 'GuidTableFieldDefinition'},
         'Origins': {'ClassUUID': 'GuidTableFieldDefinition', 'Unique': 'BoolTableFieldDefinition'},
-        'Rulebook': {'Weight': 'ModifierTableFieldDefinition'}
+        'Rulebook': {'Weight': 'ModifierTableFieldDefinition'},
+        'Races': {'ParentUUID': 'GuidTableFieldDefinition'}
     }
 
     # with open('db.json', encoding="utf-8") as f:
