@@ -1,4 +1,5 @@
 {
 	"bg3path": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Baldurs Gate 3",
-	"compileAux": 0
+	"compileAux": 0,
+	"cliMode": false
 }

@@ -1,5 +1,6 @@
 xmltodict==0.13.0
 colorama==0.4.6
 
-clr~=1.0.3
 pythonnet~=3.0.5
+PyQt6~=6.7.1
+PyQtWaitingSpinner~=1.3.2

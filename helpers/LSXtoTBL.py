@@ -1,16 +1,36 @@
-import xmltodict
+import json
+import os
+import uuid
 from pathlib import Path
-from colorama import Fore
-import json, random
-import os, sys
 
-class LSXconvert():
+import xmltodict
+from colorama import Fore
+
+from helpers.LSLibUtil import LSLibUtil
+
+
+def map_modifier_type(attribute_type: str) -> str:
+    if attribute_type == "1":
+        return "Add"
+    elif attribute_type == "2":
+        return "Multiply"
+    elif attribute_type == "3":
+        return "Override"
+    elif attribute_type == "4":
+        return "Template"
+    else:
+        print(f'{Fore.YELLOW}[info] Unknown modifier type in Rulebook [{attribute_type}] {Fore.RESET}')
+        return attribute_type
+
+
+class LSXconvert:
     data = None
     file = None
     uuid = None
     db = None
     auxIDfix = None
-    lslib_path = None
+    lslib_util: LSLibUtil = None
+    root_path = None
 
     lsf_types = ['Templates', 'SkeletonBank', 'MaterialBank', 'TextureBank', 'VisualBank', 'EffectBank', 'Tags',
                  'MultiEffectInfos', 'CharacterVisualBank', 'Material', 'MaterialPresetBank', 'PhysicsBank']
@@ -26,6 +46,9 @@ class LSXconvert():
         },
         'Races': {
             'ParentGuid': 'ParentUUID'
+        },
+        'Rulebook': {
+            'ChangeScript': 'ScriptName'
         }
     }
 
@@ -54,7 +77,13 @@ class LSXconvert():
     file_type_mappings = {
         'CompanionPresets': {'RootTemplate': 'GuidTableFieldDefinition'},
         'Origins': {'ClassUUID': 'GuidTableFieldDefinition', 'Unique': 'BoolTableFieldDefinition'},
-        'Rulebook': {'Weight': 'ModifierTableFieldDefinition'},
+        'Rulebook': {
+            'Weight': 'ModifierTableFieldDefinition',
+            'Hp': 'ModifierTableFieldDefinition',
+            'TemporaryHp': 'ModifierTableFieldDefinition',
+            'Scale': 'ModifierTableFieldDefinition',
+            'Abilities': 'ModifierListTableFieldDefinition'
+        },
         'Races': {'ParentUUID': 'GuidTableFieldDefinition', 'RaceName': 'FixedStringTableFieldDefinition'}
     }
 
@@ -71,10 +100,11 @@ class LSXconvert():
     lastName = ''
 
     # Init
-    def __init__(self, db = None, lslib_path = None):
+    def __init__(self, db = None, lslib_util: LSLibUtil = None, root_path: Path = None):
         self.file_type = None
         self.db = db
-        self.lslib_path = lslib_path
+        self.root_path = root_path
+        self.lslib_util = lslib_util
 
     def setUUID(self, uuid = None):
         self.uuid = uuid
@@ -155,7 +185,7 @@ class LSXconvert():
         construct = {'stats': {'@stat_object_definition_id': nodeUUID, 'stat_objects': {'stat_object': []}}}
 
         try: # Try adding recovered entries to auxiliary db
-            with open('auxdb_self_recovered.temp', encoding="utf-8") as f:
+            with open(self.root_path / 'auxdb_self_recovered.temp', encoding="utf-8") as f:
                 self.auxIDfix = json.load(f)
         except Exception as e:
             self.auxIDfix = {}
@@ -178,10 +208,10 @@ class LSXconvert():
             t = self.loop_builder(t, akey, aval)
 
         if self.lastName == '':
-            self.lastName = self.genUUID()
-        if not self.nodeHasEntry(t, 'NameFS'):
+            self.lastName = self.gen_uuid()
+        if not self.node_has_entry(t, 'NameFS'):
             t.append({'@name':'NameFS','@type':'FixedStringTableFieldDefinition','@value':self.lastName})
-        if not self.nodeHasEntry(t, 'Name'):
+        if not self.node_has_entry(t, 'Name'):
             t.append({'@name':'Name','@type':'NameTableFieldDefinition','@value':self.lastName})
 
         # Apply duplicate field mappings
@@ -233,12 +263,64 @@ class LSXconvert():
                     t = self.loop_builder(t, ax['@id'], 'children', ax['children'])
                     continue
                 if builder.get(ax['@id'], None) is None:
-                    builder[ax['@id']] = {'@name': ax['@id'], '@type': self.gen_dict_keytype(ax['@id']), '@value': f'{ax["attribute"]["@value"]}'}
+                    tbl_type = self.gen_dict_keytype(ax['@id'])
+                    attribute_type, attribute_value = self.get_type_value(ax)
+
+                    if tbl_type == "ModifierTableFieldDefinition":
+                        attribute_type = map_modifier_type(attribute_type)
+                        builder[ax['@id']] = {'@name': ax['@id'], '@type': self.gen_dict_keytype(ax['@id']), 'modifier': {'@value': attribute_value, '@type': attribute_type}}
+                    elif tbl_type == "EnumerationListTableFieldDefinition":
+                        pass
+                    else:
+                        builder[ax['@id']] = {'@name': ax['@id'], '@type': self.gen_dict_keytype(ax['@id']), '@value': attribute_value}
+
                 else:
                     builder[ax['@id']]['@value'] = f'{builder[ax["@id"]]["@value"]};{ax["attribute"]["@value"]}'
             for ax, bx in builder.items():
                 t.append(bx)
+        elif self.file_type == 'Rulebook' and aval == 'children':
+            if akey == 'AbilityChanges':
+                abilities_data = self.node_get_entry(t, 'Abilities')
+
+                if not abilities_data:
+                    abilities_data = {'@name':'Abilities', '@type':self.gen_dict_keytype('Abilities'), 'value': {'modifier': []}}
+                    t.append(abilities_data)
+
+                attribute_type, attribute_value = self.get_type_value(lnode['node'])
+                attribute_type = map_modifier_type(attribute_type)
+                abilities_data['value']['modifier'].append({'@value': attribute_value, '@type': attribute_type})
+            else:
+                # :-(
+                if akey == 'ActionsCapabilities':
+                    akey = 'ActionCapabilities'
+
+                node_type = self.gen_dict_keytype(akey)
+                if isinstance(lnode['node'], list):
+                    items = lnode['node']
+                else:
+                    items = [lnode['node']]
+
+                value_list = []
+                for item in items:
+                    value_list.append(item['attribute']['@value'])
+
+                t.append({'@name':akey, '@type':node_type, '@enumeration_type_name':self.db['DataTypes']['EnumTypes'].get(akey), '@version': '1', '@value':";".join(value_list)})
+
         return t
+
+    def get_type_value(self, attributes):
+        if isinstance(attributes["attribute"], list):
+            attributes = attributes["attribute"]
+        else:
+            attributes = [attributes["attribute"]]
+        attribute_type = ""
+        attribute_value = ""
+        for attribute in attributes:
+            if attribute['@id'] == "type":
+                attribute_type = attribute['@value']
+            elif attribute['@id'] in ["Name", "Object", "value"]:
+                attribute_value = attribute['@value']
+        return attribute_type, attribute_value
 
     # Generate dict lsx node from xml node
     def gen_dict(self, node):
@@ -363,17 +445,11 @@ class LSXconvert():
         except IndexError:
             return default
 
-    def genUUID(self):
-        uuid = ""
-        for i in range(36):
-            if i == 8 or i == 13 or i == 18 or i == 23:
-                uuid += "-"
-            else:
-                uuid += random.choice("abcdef0123456789")
-        return uuid
+    def gen_uuid(self) -> str:
+        return str(uuid.uuid4())
 
     # Check if node contains element
-    def nodeHasEntry(self, node, entry):
+    def node_has_entry(self, node, entry):
         try:
             for x in node:
                 if x.get('@name', None) == entry:
@@ -381,6 +457,16 @@ class LSXconvert():
             return False
         except Exception:
             return False
+
+    # Get entry from node
+    def node_get_entry(self, node, entry):
+        try:
+            for x in node:
+                if x.get('@name', None) == entry:
+                    return x
+            return None
+        except Exception:
+            return None
 
     def getDataType(self, file = None):
         if not file is None:
@@ -400,27 +486,6 @@ class LSXconvert():
         if file is None:
             file = self.file
 
-        divine = Path(self.lslib_path)
-        lslib_dll = divine.is_dir() and divine.joinpath("LSLib.dll") or divine.parent.joinpath("LSLib.dll")
-
-        if not lslib_dll.exists():
-            if verbose:
-                print(f'{Fore.RED}[lsf] Cant convert {os.path.basename(file)} (LSLib not found){Fore.RESET}')
-            return False
-
-        # Setting up lslib dll for use
-        import pythonnet
-        pythonnet.load('coreclr')
-        import clr
-        if not str(lslib_dll.parent.absolute()) in sys.path:
-            sys.path.append(str(lslib_dll.parent.absolute()))
-        clr.AddReference("LSLib")
-        from LSLib.LS import ResourceUtils, ResourceConversionParameters, ResourceLoadParameters
-        from LSLib.LS.Enums import Game, ResourceFormat
-        
-        load_params = ResourceLoadParameters.FromGameVersion(Game.BaldursGate3)
-        conversion_params = ResourceConversionParameters.FromGameVersion(Game.BaldursGate3)
-
         file_path = Path(file)
         trimmed_file_path = file_path
         # Due to unpacking some files get multiple suffix, so trim duplicates
@@ -433,23 +498,8 @@ class LSXconvert():
         if output.exists():
             os.remove(output)
 
-        input_str = str(file_path.absolute())
-        output_str = str(output.absolute())
-        
-        out_format = ResourceUtils.ExtensionToResourceFormat(output_str)
-        resource = ResourceUtils.LoadResource(input_str, load_params)
-        ResourceUtils.SaveResource(resource, output_str, out_format, conversion_params)
+        self.lslib_util.convert_file(file_path, output)
 
         if verbose:
             print(f'{Fore.GREEN}[info] Converted {os.path.basename(self.file)} (Converted to LSF){Fore.RESET}')
         return True
-
-# Convert every lsx file in dir
-if __name__ == "__main__":
-    conv = LSXconvert()
-    for file in Path('.').rglob('*.lsx'):
-        try:
-            conv.convert(str(file))
-            print(f'Converted {file}')
-        except Exception as e:
-            print(f'Failed to convert {file}:\n\t{e}')

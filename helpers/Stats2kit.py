@@ -1,10 +1,11 @@
-import xmltodict
-import random
-from pathlib import Path
-from colorama import Fore, Back, Style
-import colorama
 import json
 import os
+import uuid
+from pathlib import Path
+
+import xmltodict
+from colorama import Fore
+
 
 class StatsConvert():
     data = None
@@ -12,11 +13,13 @@ class StatsConvert():
     uuid = None
     db = None
     auxdb = None
+    root_path = None
 
     # Init
-    def __init__(self, db=None, auxdb=None):
+    def __init__(self, db=None, auxdb=None, root_path: Path = None):
         self.db = db
         self.auxdb = auxdb
+        self.root_path = root_path
 
     def setUUID(self, uuid=None):
         self.uuid = uuid
@@ -75,17 +78,19 @@ class StatsConvert():
                         t = []
                         i = 0
                     dupes = []
-                    newUID = self.genUUID()
-                    nameval = raw[0].replace(f'{os.path.basename(self.file).split(".")[0].replace("Spell_","")}_', '')
+                    newUID = self.gen_uuid()
+                    stat_name = raw[0]
+                    if os.path.basename(self.file).startswith("Spell_"):
+                        stat_name = raw[0].removeprefix(f'{os.path.basename(self.file).split(".")[0].replace("Spell_","")}_')
 
                     fname, fext = os.path.splitext(os.path.basename(self.file).replace("Spell_",""))
                     if fname == "Projectile" or fname == "Target" or fname == "Zone" or fname == "Shout" or fname == "ProjectileStrike" or fname == "Rush" or fname == "Teleportation" or fname == "Throw":
-                        auxIDfix[f'{fname}_{nameval}'] = newUID
+                        auxIDfix[f'{fname}_{stat_name}'] = newUID
                     else:
-                        auxIDfix[nameval] = newUID
+                        auxIDfix[stat_name] = newUID
 
                     t.append({'@name': 'UUID', '@type': 'IdTableFieldDefinition', '@value': newUID})
-                    t.append({'@name': 'Name', '@type': 'NameTableFieldDefinition', '@value': nameval})
+                    t.append({'@name': 'Name', '@type': 'NameTableFieldDefinition', '@value': stat_name})
                     continue
                 if line[:5:] == "using": # Skip parent if IDs not in aux db
                     t.append({'@name': 'Using', '@type': 'BaseClassTableFieldDefinition', '@value': self.auxdb.get(raw[0],raw[0])})
@@ -119,7 +124,7 @@ class StatsConvert():
                         isRecovered = False
         if not isRecovered:
             print(f'{Fore.YELLOW}[stats] Missing parent entries in: {os.path.basename(self.file)}{Fore.WHITE}')
-        with open('auxdb_self_recovered.temp', 'w') as f:
+        with open(self.root_path / 'auxdb_self_recovered.temp', 'w') as f:
             f.write(json.dumps(auxIDfix, indent=4))
         return construct
 
@@ -150,10 +155,21 @@ class StatsConvert():
                 if not data[0] in ['SpellType', 'StatusType']:
                     print(f'{Fore.YELLOW}[stats] Missing Pre-Configured Data Type: {data[0]}{Fore.WHITE}')
             if self.db['DataTypes'].get(data[0], '') == "EnumerationListTableFieldDefinition" or self.db['DataTypes'].get(data[0], '') == "EnumerationTableFieldDefinition": # Enum types
-                builder['@enumeration_type_name'] = self.db['DataTypes']['EnumTypes'].get(data[0], data[0])
+                # Special handling for status/spell sheathing fields named the same but different enums
+                if fname.startswith('Status_') and data[0] == 'Sheathing':
+                    enum_type_lookup = f'{data[0]}_Status'
+                else:
+                    enum_type_lookup = data[0]
+                builder['@enumeration_type_name'] = self.db['DataTypes']['EnumTypes'].get(enum_type_lookup, enum_type_lookup)
+
                 builder['@version'] = "1"
                 if not builder['@value'] == '':
                     val = self.db['DataTypes']['EnumSubTypes'].get(builder['@enumeration_type_name'], builder['@value'])
+                    if isinstance(val, dict):
+                        builder['@value'] = val.get(builder['@value'], builder['@value'])
+            if self.db['DataTypes'].get(data[0], '') == "BoolTableFieldDefinition":
+                if not builder['@value'] == '':
+                    val = self.db['DataTypes']['EnumSubTypes'].get('BoolTableFieldDefinition', builder['@value'])
                     if isinstance(val, dict):
                         builder['@value'] = val.get(builder['@value'], builder['@value'])
             return builder
@@ -162,14 +178,8 @@ class StatsConvert():
             return None
 
     # Generate a new UUID
-    def genUUID(self):
-        uuid = ""
-        for i in range(36):
-            if i == 8 or i == 13 or i == 18 or i == 23:
-                uuid += "-"
-            else:
-                uuid += random.choice("abcdef0123456789")
-        return uuid
+    def gen_uuid(self) -> str:
+        return str(uuid.uuid4())
 
     # Check if a given string is a valid GUID
     def is_guid(self, val):
@@ -203,7 +213,7 @@ class StatsConvert():
             # Initialize new field section for new table
             if line.startswith("new treasuretable"):
                 has_subtable = False
-                base_table_uuid = self.genUUID()
+                base_table_uuid = self.gen_uuid()
                 base_table_name = tokens[2].strip('"')
                 t.append({'@name': 'UUID', '@type': 'IdTableFieldDefinition', '@value': base_table_uuid})
                 t.append({'@name': 'Name', '@type': 'NameTableFieldDefinition', '@value': base_table_name})
@@ -214,7 +224,7 @@ class StatsConvert():
                     builder = self.gen_dict(["Using", base_table_uuid])
                     if not builder is None:
                         t.append(builder)
-                    t.append({'@name': 'UUID', '@type': 'IdTableFieldDefinition', '@value': self.genUUID()})
+                    t.append({'@name': 'UUID', '@type': 'IdTableFieldDefinition', '@value': self.gen_uuid()})
                     t.append({'@name': 'Name', '@type': 'NameTableFieldDefinition', '@value': str(base_table_name + '_substat')})
                 else:
                     has_subtable = True

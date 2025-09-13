@@ -5,7 +5,7 @@ a = Analysis(
     ['Convert2Toolkit.py'],
     pathex=[],
     binaries=[],
-    datas=[('helpers/templates', 'helpers/templates'), ('LSLibDivine', 'LSLibDivine')],
+    datas=[('lib', 'lib')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,6 +35,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='lib/res/convert.ico'
 )
 
 import shutil

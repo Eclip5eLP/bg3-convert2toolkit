@@ -5,6 +5,7 @@
 __pycache__/
 /auxdb.json
 /convert/
+/convert_dev/
 /auxdb_self_recovered.temp
 /build/
 /dist/
