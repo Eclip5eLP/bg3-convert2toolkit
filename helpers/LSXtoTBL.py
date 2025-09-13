@@ -55,7 +55,14 @@ class LSXconvert():
         'CompanionPresets': {'RootTemplate': 'GuidTableFieldDefinition'},
         'Origins': {'ClassUUID': 'GuidTableFieldDefinition', 'Unique': 'BoolTableFieldDefinition'},
         'Rulebook': {'Weight': 'ModifierTableFieldDefinition'},
-        'Races': {'ParentUUID': 'GuidTableFieldDefinition'}
+        'Races': {'ParentUUID': 'GuidTableFieldDefinition', 'RaceName': 'FixedStringTableFieldDefinition'}
+    }
+
+    # Duplicate field mappings - creates additional fields with different names
+    duplicate_field_mappings = {
+        'Races': {
+            'Name': 'RaceName'
+        }
     }
 
     # with open('db.json', encoding="utf-8") as f:
@@ -176,6 +183,26 @@ class LSXconvert():
             t.append({'@name':'NameFS','@type':'FixedStringTableFieldDefinition','@value':self.lastName})
         if not self.nodeHasEntry(t, 'Name'):
             t.append({'@name':'Name','@type':'NameTableFieldDefinition','@value':self.lastName})
+
+        # Apply duplicate field mappings
+        fname, fext = os.path.splitext(os.path.basename(self.file))
+        if fname in self.duplicate_field_mappings:
+            for field_name, duplicate_name in self.duplicate_field_mappings[fname].items():
+                # Find the original field
+                for field in t:
+                    if field.get('@name') == field_name:
+                        # Create duplicate field with same value
+                        duplicate_field = field.copy()
+                        duplicate_field['@name'] = duplicate_name
+
+                        # Apply correct type from file_type_mappings if available
+                        if self.file_type in self.file_type_mappings:
+                            if duplicate_name in self.file_type_mappings[self.file_type]:
+                                duplicate_field['@type'] = self.file_type_mappings[self.file_type][duplicate_name]
+
+                        t.append(duplicate_field)
+                        break
+
         self.lastName = ''
         return t
 
