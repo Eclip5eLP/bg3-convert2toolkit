@@ -15,6 +15,45 @@ class LSXconvert():
     lsf_types = ['Templates', 'SkeletonBank', 'MaterialBank', 'TextureBank', 'VisualBank', 'EffectBank', 'Tags',
                  'MultiEffectInfos', 'CharacterVisualBank', 'Material', 'MaterialPresetBank', 'PhysicsBank']
 
+    # Attribute name mappings for different file types
+    attribute_name_mappings = {
+        'DefaultValues': {
+            'TableUUID': 'ProgressionUUID',
+            'OriginUUID': 'Origin'
+        },
+        'ClassDescriptions': {
+            'ParentGuid': 'ParentUUID'
+        }
+    }
+
+    # Special conditional mappings
+    file_specific_mappings = {
+        'DefaultValues': {
+            'Add': lambda fname: 'DefaultValues' if fname != 'Spells' else 'Add'
+        }
+    }
+
+    # Data type mappings for different file types and field names
+    data_type_mappings = {
+        ('Progressions', None, 'IntegerTableFieldDefinition'): 'ByteTableFieldDefinition',
+        ('ProgressionDescriptions', 'Type', None): 'FixedStringTableFieldDefinition',
+        ('Spells', 'SelectorId', None): 'StringTableFieldDefinition',
+        ('Abilities', 'SelectorId', None): 'StringTableFieldDefinition',
+        ('Passives', 'SelectorId', None): 'StringTableFieldDefinition',
+        ('Skills', 'SelectorId', None): 'StringTableFieldDefinition',
+        ('Spells', 'ClassUUID', None): 'GuidTableFieldDefinition',
+        ('Abilities', 'ClassUUID', None): 'GuidTableFieldDefinition',
+        ('Passives', 'ClassUUID', None): 'GuidTableFieldDefinition',
+        ('Skills', 'ClassUUID', None): 'GuidTableFieldDefinition'
+    }
+
+    # File type specific mappings
+    file_type_mappings = {
+        'CompanionPresets': {'RootTemplate': 'GuidTableFieldDefinition'},
+        'Origins': {'ClassUUID': 'GuidTableFieldDefinition', 'Unique': 'BoolTableFieldDefinition'},
+        'Rulebook': {'Weight': 'ModifierTableFieldDefinition'}
+    }
+
     # with open('db.json', encoding="utf-8") as f:
     #     backup_db = json.load(f)
 
@@ -179,16 +218,18 @@ class LSXconvert():
             # Attach values to keys
             for key, val in node.items():
                 if key == '@id':
-                    # Hardcoded lsx name fixes
-                    if self.file_type == 'DefaultValues':
-                        if val == 'TableUUID':
-                            val = 'ProgressionUUID'
-                        if val == 'OriginUUID':
-                            val = 'Origin'
-                        if val == 'Add' and fname != 'Spells':
-                            val = 'DefaultValues'
-                    if fname == 'ClassDescriptions' and val == 'ParentGuid':
-                        val = 'ParentUUID'
+                    # Apply attribute name mappings
+                    if self.file_type in self.attribute_name_mappings:
+                        val = self.attribute_name_mappings[self.file_type].get(val, val)
+
+                    if fname in self.attribute_name_mappings:
+                        val = self.attribute_name_mappings[fname].get(val, val)
+
+                    # Apply file-specific conditional mappings
+                    if self.file_type in self.file_specific_mappings:
+                        for attr, mapping_func in self.file_specific_mappings[self.file_type].items():
+                            if val == attr:
+                                val = mapping_func(fname)
 
                     ndict['@name'] = val
                     continue
@@ -223,25 +264,17 @@ class LSXconvert():
         fname, fext = os.path.splitext(os.path.basename(self.file))
         dtype = self.db['DataTypes'].get(key, '')
 
-        # Hardcoded lsx type fixes
-        if dtype == 'IntegerTableFieldDefinition' and fname == 'Progressions':
-            dtype = 'ByteTableFieldDefinition'
-        if fname == 'ProgressionDescriptions' and val == 'Type':
-            dtype = 'FixedStringTableFieldDefinition'
-        if (fname == 'Spells' or fname == 'Abilities' or fname == 'Passives' or fname == 'Skills'):
-            if val == 'SelectorId':
-                dtype = 'StringTableFieldDefinition'
-            if val == 'ClassUUID':
-                dtype = 'GuidTableFieldDefinition'
-        if self.file_type == 'CompanionPresets' and key == 'RootTemplate':
-            dtype = 'GuidTableFieldDefinition'
-        if self.file_type == 'Origins':
-            if key == 'ClassUUID':
-                dtype = 'GuidTableFieldDefinition'
-            if key == 'Unique':
-                dtype = 'BoolTableFieldDefinition'
-        if self.file_type == 'Rulebook' and key == 'Weight':
-            dtype = 'ModifierTableFieldDefinition'
+        # Apply data type mappings
+        for (mapped_fname, mapped_val, mapped_dtype), new_dtype in self.data_type_mappings.items():
+            if ((mapped_fname is None or fname == mapped_fname) and
+                (mapped_val is None or val == mapped_val) and
+                (mapped_dtype is None or dtype == mapped_dtype)):
+                dtype = new_dtype
+                break
+
+        # Apply file type specific mappings
+        if self.file_type in self.file_type_mappings:
+            dtype = self.file_type_mappings[self.file_type].get(key, dtype)
 
         return dtype
 
