@@ -88,7 +88,7 @@ class ConvertAPI:
             if file.name in FORCE_FAIL:
                 print(f'{Fore.YELLOW}[info] Skipped file: {file.name} (Reason: Not yet supported){Fore.RESET}')
                 continue
-            elif file.full_match('**/Mods/*/Story/**'):
+            elif file.match('**/Mods/*/Story/**'):
                 print(f'{Fore.YELLOW}[info] Skipped file: {file.name} (Reason: Osiris Script){Fore.RESET}')
                 continue
             self._convert_internal(file, self._db['Stats'], self._stats_converter)
