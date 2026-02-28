@@ -35,6 +35,65 @@ class LSXconvert:
     lsf_types = ['Templates', 'SkeletonBank', 'MaterialBank', 'TextureBank', 'VisualBank', 'EffectBank', 'Tags',
                  'MultiEffectInfos', 'CharacterVisualBank', 'Material', 'MaterialPresetBank', 'PhysicsBank']
 
+    # Attribute name mappings for different file types
+    attribute_name_mappings = {
+        'DefaultValues': {
+            'TableUUID': 'ProgressionUUID',
+            'OriginUUID': 'Origin'
+        },
+        'ClassDescriptions': {
+            'ParentGuid': 'ParentUUID'
+        },
+        'Races': {
+            'ParentGuid': 'ParentUUID'
+        },
+        'Rulebook': {
+            'ChangeScript': 'ScriptName'
+        }
+    }
+
+    # Special conditional mappings
+    file_specific_mappings = {
+        'DefaultValues': {
+            'Add': lambda fname: 'DefaultValues' if fname != 'Spells' else 'Add'
+        }
+    }
+
+    # Data type mappings for different file types and field names
+    data_type_mappings = {
+        ('Progressions', None, 'IntegerTableFieldDefinition'): 'ByteTableFieldDefinition',
+        ('ProgressionDescriptions', 'Type', None): 'FixedStringTableFieldDefinition',
+        ('Spells', 'SelectorId', None): 'StringTableFieldDefinition',
+        ('Abilities', 'SelectorId', None): 'StringTableFieldDefinition',
+        ('Passives', 'SelectorId', None): 'StringTableFieldDefinition',
+        ('Skills', 'SelectorId', None): 'StringTableFieldDefinition',
+        ('Spells', 'ClassUUID', None): 'GuidTableFieldDefinition',
+        ('Abilities', 'ClassUUID', None): 'GuidTableFieldDefinition',
+        ('Passives', 'ClassUUID', None): 'GuidTableFieldDefinition',
+        ('Skills', 'ClassUUID', None): 'GuidTableFieldDefinition'
+    }
+
+    # File type specific mappings
+    file_type_mappings = {
+        'CompanionPresets': {'RootTemplate': 'GuidTableFieldDefinition'},
+        'Origins': {'ClassUUID': 'GuidTableFieldDefinition', 'Unique': 'BoolTableFieldDefinition'},
+        'Rulebook': {
+            'Weight': 'ModifierTableFieldDefinition',
+            'Hp': 'ModifierTableFieldDefinition',
+            'TemporaryHp': 'ModifierTableFieldDefinition',
+            'Scale': 'ModifierTableFieldDefinition',
+            'Abilities': 'ModifierListTableFieldDefinition'
+        },
+        'Races': {'ParentUUID': 'GuidTableFieldDefinition', 'RaceName': 'FixedStringTableFieldDefinition'}
+    }
+
+    # Duplicate field mappings - creates additional fields with different names
+    duplicate_field_mappings = {
+        'Races': {
+            'Name': 'RaceName'
+        }
+    }
+
     # with open('db.json', encoding="utf-8") as f:
     #     backup_db = json.load(f)
 
@@ -74,7 +133,15 @@ class LSXconvert:
             source_ext = '.lsx'
         if dest_ext is None:
             dest_ext = '.tbl'
+        # Construct the output path, replacing the extension
         out = file.replace(source_ext, dest_ext)
+        # Check if the original path contains "Public" and replace with "Editor" if necessary
+        if os.path.sep + "Public" + os.path.sep in file:
+            # Ensure the Editor/Mods directory exists
+            editor_mods_path = os.path.sep + "Editor" + os.path.sep + "Mods" + os.path.sep
+            editor_path_dir = os.path.dirname(out.replace(os.path.sep + "Public" + os.path.sep, editor_mods_path))
+            os.makedirs(editor_path_dir, exist_ok=True)
+            out = out.replace(os.path.sep + "Public" + os.path.sep, editor_mods_path)
         with open(out, 'w', encoding="utf-8") as f:
             f.write(xmltodict.unparse(data, pretty=True, indent='  '))
         return True
@@ -146,6 +213,26 @@ class LSXconvert:
             t.append({'@name':'NameFS','@type':'FixedStringTableFieldDefinition','@value':self.lastName})
         if not self.node_has_entry(t, 'Name'):
             t.append({'@name':'Name','@type':'NameTableFieldDefinition','@value':self.lastName})
+
+        # Apply duplicate field mappings
+        fname, fext = os.path.splitext(os.path.basename(self.file))
+        if fname in self.duplicate_field_mappings:
+            for field_name, duplicate_name in self.duplicate_field_mappings[fname].items():
+                # Find the original field
+                for field in t:
+                    if field.get('@name') == field_name:
+                        # Create duplicate field with same value
+                        duplicate_field = field.copy()
+                        duplicate_field['@name'] = duplicate_name
+
+                        # Apply correct type from file_type_mappings if available
+                        if self.file_type in self.file_type_mappings:
+                            if duplicate_name in self.file_type_mappings[self.file_type]:
+                                duplicate_field['@type'] = self.file_type_mappings[self.file_type][duplicate_name]
+
+                        t.append(duplicate_field)
+                        break
+
         self.lastName = ''
         return t
 
@@ -244,20 +331,18 @@ class LSXconvert:
             # Attach values to keys
             for key, val in node.items():
                 if key == '@id':
-                    # Hardcoded lsx name fixes
-                    if self.file_type == 'DefaultValues':
-                        if val == 'TableUUID':
-                            val = 'ProgressionUUID'
-                        if val == 'OriginUUID':
-                            val = 'Origin'
-                        if val == 'Add' and fname != 'Spells':
-                            val = 'DefaultValues'
-                    if fname == 'ClassDescriptions' and val == 'ParentGuid':
-                        val = 'ParentUUID'
-                    if fname == 'Rulebook':
-                        # Larian please, I beg you...
-                        if val == 'ChangeScript':
-                            val = 'ScriptName'
+                    # Apply attribute name mappings
+                    if self.file_type in self.attribute_name_mappings:
+                        val = self.attribute_name_mappings[self.file_type].get(val, val)
+
+                    if fname in self.attribute_name_mappings:
+                        val = self.attribute_name_mappings[fname].get(val, val)
+
+                    # Apply file-specific conditional mappings
+                    if self.file_type in self.file_specific_mappings:
+                        for attr, mapping_func in self.file_specific_mappings[self.file_type].items():
+                            if val == attr:
+                                val = mapping_func(fname)
 
                     ndict['@name'] = val
                     continue
@@ -292,27 +377,17 @@ class LSXconvert:
         fname, fext = os.path.splitext(os.path.basename(self.file))
         dtype = self.db['DataTypes'].get(key, '')
 
-        # Hardcoded lsx type fixes
-        if dtype == 'IntegerTableFieldDefinition' and fname == 'Progressions':
-            dtype = 'ByteTableFieldDefinition'
-        if fname == 'ProgressionDescriptions' and val == 'Type':
-            dtype = 'FixedStringTableFieldDefinition'
-        if (fname == 'Spells' or fname == 'Abilities' or fname == 'Passives' or fname == 'Skills'):
-            if val == 'SelectorId':
-                dtype = 'StringTableFieldDefinition'
-            if val == 'ClassUUID':
-                dtype = 'GuidTableFieldDefinition'
-        if self.file_type == 'CompanionPresets' and key == 'RootTemplate':
-            dtype = 'GuidTableFieldDefinition'
-        if self.file_type == 'Origins':
-            if key == 'ClassUUID':
-                dtype = 'GuidTableFieldDefinition'
-            if key == 'Unique':
-                dtype = 'BoolTableFieldDefinition'
-        if self.file_type == 'Rulebook' and key in ['Weight', 'Hp', 'TemporaryHp', 'Scale']:
-            dtype = 'ModifierTableFieldDefinition'
-        if self.file_type == 'Rulebook' and key in ['Abilities']:
-            dtype = 'ModifierListTableFieldDefinition'
+        # Apply data type mappings
+        for (mapped_fname, mapped_val, mapped_dtype), new_dtype in self.data_type_mappings.items():
+            if ((mapped_fname is None or fname == mapped_fname) and
+                (mapped_val is None or val == mapped_val) and
+                (mapped_dtype is None or dtype == mapped_dtype)):
+                dtype = new_dtype
+                break
+
+        # Apply file type specific mappings
+        if self.file_type in self.file_type_mappings:
+            dtype = self.file_type_mappings[self.file_type].get(key, dtype)
 
         return dtype
 
