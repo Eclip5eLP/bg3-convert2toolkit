@@ -15,6 +15,17 @@ class LSLibUtil:
         import pythonnet
         pythonnet.load('coreclr')
         import clr
+        from System.Globalization import CultureInfo
+        from System.Threading import Thread
+
+        # Ensure LSLib serializes numeric values with "." regardless of Windows locale
+        invariant_culture = CultureInfo.InvariantCulture
+
+        CultureInfo.DefaultThreadCurrentCulture = invariant_culture
+        CultureInfo.DefaultThreadCurrentUICulture = invariant_culture
+
+        Thread.CurrentThread.CurrentCulture = invariant_culture
+        Thread.CurrentThread.CurrentUICulture = invariant_culture
         if not str(self._lslib_dll.parent.absolute()) in sys.path:
             sys.path.append(str(self._lslib_dll.parent.absolute()))
 
