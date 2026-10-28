@@ -269,20 +269,27 @@ Expected file names (note not all types may be supported currently)
 - `cliMode`
   - true or false to run in cli mode or start gui 
 - `userPrefix` (optional)
-  - Your own prefix, e.g. `"SYR_"`: spells named `SYR_Target_Smite` become `Target_SYR_Smite` instead of `Target_SYR_Target_Smite`
-- `replaceMismatchedSpellPrefixes` (optional, default false)
-  - true: a Projectile spell named `Target_X` becomes `Projectile_X`. false: it becomes `Projectile_Target_X`
+  - Your personal prefix if you use one, e.g. `"SYR_"`
+  - `SYR_Target_Smite` becomes `Target_SYR_Smite` instead of `Target_SYR_Target_Smite`
+- `replaceMismatchedSpellPrefixes` (optional)
+  - true or false, if a spell has the prefix of another spell type it gets replaced
+  - e.g. a Projectile spell called `Target_Bolt` becomes `Projectile_Bolt` instead of `Projectile_Target_Bolt`
+- `maxTextureSize` (optional)
+  - Textures larger than this get scaled down (default 2048, 0 to turn it off)
+- `texconvPath` (optional)
+  - Path to `texconv.exe`, only needed if it isn't found in your BG3 Toolkit folder
 
 
 ---
 ## Conversion report
-Next to every created project a `<Project>_Report.txt` is written when something needs your attention:
-- Malformed UUIDs that were repaired. The toolkit crashes while loading a project that contains one.
-  The intended UUID is restored when the same node/attribute uses it elsewhere in the mod, otherwise a new UUID is used everywhere the malformed one appears.
-- Spells that were renamed because the toolkit exports spells as `<SpellType>_<Name>`.
-  References are updated (whole names only, case-sensitive) in stats, tables, RootTemplates, SpellLists, Progressions,
-  Rulebooks, Osiris goals, khn scripts and localization. References in any other file, and in compiled Osiris
-  stories, are only listed in the report and need to be updated manually.
+If something needs your attention a `<Project>_Report.txt` is created next to the project. Give it a quick read, it lists:
+- Broken UUIDs that got fixed (the toolkit crashes on load if a mod has even one of them)
+- Spells that got renamed. The toolkit always exports spells as `<SpellType>_<Name>`, so spells without the right prefix
+  are renamed and their references are updated in stats, tables, SpellLists, Progressions, Rulebooks, RootTemplates,
+  Osiris goals, khn scripts and localization
+- References to renamed spells in any other file, these you need to check yourself
+- Textures that were scaled down. Icon atlases are only cropped to the part that is actually used where possible, so the icons keep their quality
+- Duplicate localization strings that were removed
 
 
 ---
@@ -290,18 +297,17 @@ Next to every created project a `<Project>_Report.txt` is written when something
 - Actual conversion logic is the same as CLI mode
 - Supports providing a source path and output path
 - Source path must be a directory or pak file
-  - Does not support converting multiple pak files at once (use CLI mode for that)
+  - Does not support converting multiple pak files at once
 - Output path must be a directory
 - `Compile AuxDB` button builds additional UUIDs from Editor projects like compileAux setting 
 
 
 ---
 ## Running with python
-Requires Python 3.10 or newer. Run `pip install -r requirements.txt` to install the required libraries.
+Needs Python 3.10 or newer. Run `pip install -r requirements.txt` to install the required libraries.
 
 Put all files you want to convert into a folder named `convert` inside the root of the script.
-You can also drop an entire project or `.pak` files into it (paks are unpacked into a folder of the same name).
-Projects created by a previous run are recognized and not converted again.
+You can also drop an entire project into it, or just the `.pak`, `.zip` or `.rar` you downloaded.
 
 run `py Convert2Toolkit.py` to start conversion.
 - add `--cli` or `--gui` to override mode type set in settings.json
@@ -320,9 +326,8 @@ run `py Convert2Toolkit.py` to start conversion.
 
 ---
 ## Updating db.json
-`db.json` contains the field definitions of the toolkit (`Schema`), read from
-`Data/Editor/Config/UuidObjects/TableDefinitions.sod` and `Data/Editor/Config/Stats/StatObjectDefinitions.sod`.
-After a toolkit update run `py -m helpers.CompileDB "<path to Baldurs Gate 3>"` to refresh it.
+`db.json` holds the field definitions the toolkit uses. If a toolkit update changes them, run
+`py -m helpers.CompileDB "C:/any/folder/until/Baldurs Gate 3/"` to rebuild it.
 
 
 ---
@@ -335,15 +340,15 @@ After a toolkit update run `py -m helpers.CompileDB "<path to Baldurs Gate 3>"` 
 ## Future Features
 - [ ] Add conversion for lsfx --> lsefx
 
-- [X] Add conversion for SpellSet.txt, Equipment.txt, ItemCombos.txt and Data/XPData.txt
+- [ ] Add conversion for BloodTypes, ItemTypes, ItemColor and ItemProgression
 
-- [X] Route stats entries by their type instead of the file name (any file name works)
+- [ ] Decompile Osiris stories (story.div.osi) back into goal files
 
-- [X] Merge multiple lsx files of the same table and place them where the toolkit expects them
+- [X] Add conversion for SpellSet.txt, Equipment.txt and ItemCombos.txt
 
-- [ ] Add conversion for BloodTypes, ItemTypes, ItemColor and ItemProgression txt (kept as txt for now)
+- [X] Support stat files with any name
 
-- [ ] Decompile compiled Osiris stories (story.div.osi) back into goal files
+- [X] Fix broken UUIDs and scale down oversized textures
 
 - [X] Add conversion for Rulebooks.lsx
 
@@ -354,10 +359,8 @@ After a toolkit update run `py -m helpers.CompileDB "<path to Baldurs Gate 3>"` 
 
 ---
 ## Troubleshooting/Known Issues
-- Spells are renamed to follow the toolkit's `<SpellType>_<Name>` naming, see the conversion report for references
-  that could not be updated automatically.
-- Comments of lsx tables can't be recovered, the game files don't contain them.
-- Story mods only ship compiled Osiris files, these are copied but can't be edited in the toolkit.
+- Comments from Editor tables are lost, mods don't contain them.
+- Mods only ship compiled Osiris scripts. They are copied over, but you can't edit them in the toolkit.
 - The game seems more relaxed than the toolkit in certain regards.  I observed while testing a case where a mod 
   defined multiple MultiEffectInfos in lsx with the **same** UUID.  The game seemed unconcerned, and the scripts
   were able to convert.  However, the toolkit MEI editor would crash unless I removed the duplicate.
@@ -365,7 +368,7 @@ After a toolkit update run `py -m helpers.CompileDB "<path to Baldurs Gate 3>"` 
 
 ---
 ## Credits
-- Spell renaming and UUID checks are based on [Syrchalis' Pre-Converter](https://github.com/Syrchalis/bg3-preconvert2toolkit)
+- Spell renaming and UUID checks are based on [Syrchalis' Pre-Converter](https://github.com/Syrchalis/bg3-preconvert2toolkit), thanks!
 
 
 ---

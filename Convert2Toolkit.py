@@ -21,6 +21,8 @@ if __name__ == "__main__":
 		cli_mode = settings.get('cliMode', True)
 		user_prefix = settings.get('userPrefix', '')
 		replace_mismatched_prefixes = settings.get('replaceMismatchedSpellPrefixes', False)
+		max_texture_size = settings.get('maxTextureSize', 2048)
+		texconv_path = settings.get('texconvPath', '')
 
 	# Handle command line args
 	parser = argparse.ArgumentParser(
@@ -70,7 +72,9 @@ if __name__ == "__main__":
 		lslib_util=lslib_util,
 		compile_aux_db=compileAux,
 		user_prefix=user_prefix,
-		replace_mismatched_prefixes=replace_mismatched_prefixes
+		replace_mismatched_prefixes=replace_mismatched_prefixes,
+		max_texture_size=max_texture_size,
+		texconv_path=texconv_path
 	)
 
 	# Determine process command line vs GUI

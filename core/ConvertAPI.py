@@ -9,6 +9,7 @@ from helpers.LSLibUtil import LSLibUtil
 from helpers.LSXtoTBL import LSXconvert, strip_suffixes
 from helpers.ProjectBuilder import ProjectBuilder, is_intermediate
 from helpers.Stats2kit import StatsConvert, is_stats_file, stats_root, SPELL_TYPES
+from helpers.TextureResizer import TextureResizer, find_texconv
 from helpers.UUIDFixer import UUIDFixer
 
 EXCLUSIONS = ['meta.lsx', 'metadata.lsf.lsx']
@@ -23,7 +24,9 @@ class ConvertAPI:
                  lslib_util: LSLibUtil,
                  compile_aux_db: bool = False,
                  user_prefix: str = '',
-                 replace_mismatched_prefixes: bool = False):
+                 replace_mismatched_prefixes: bool = False,
+                 max_texture_size: int = 2048,
+                 texconv_path: str = ''):
         self.path_to_root = path_to_root
         self.lslib_util = lslib_util
         self.src_bg3_path = src_bg3_path
@@ -31,6 +34,7 @@ class ConvertAPI:
         self._db = self._get_db()
         self._stats_converter = StatsConvert(self._db, self._aux_db, self.path_to_root, user_prefix, replace_mismatched_prefixes)
         self._uuid_fixer = UUIDFixer(self.lslib_util)
+        self._texture_resizer = TextureResizer(find_texconv(src_bg3_path, texconv_path), max_texture_size, self.lslib_util)
         self._lsx_converter = LSXconvert(self._db, self.lslib_util, self.path_to_root)
         self._locale_fixer = FixLocale()
         stats_categories = {name: d['category'] for name, d in self._db.get('Schema', {}).get('Stats', {}).items()}
@@ -57,6 +61,7 @@ class ConvertAPI:
         self._reports = {}
         self.prepare_binaries(source_path)
         self.fix_uuids(source_path)
+        self.resize_textures(source_path)
         self.convert_stat_files(source_path)
         self.convert_lsx_files(source_path)
         self.fix_locales(source_path)
@@ -103,6 +108,12 @@ class ConvertAPI:
         print(f'{Fore.CYAN}[main] Checking UUIDs:{Fore.RESET}')
         for root in self._project_roots(source_path):
             self._report(root, self._uuid_fixer.fix(root))
+
+    def resize_textures(self, source_path: Path):
+        """Textures above the configured size waste VRAM and inflate the mod"""
+        print(f'{Fore.CYAN}[main] Checking texture sizes:{Fore.RESET}')
+        for root in self._project_roots(source_path):
+            self._report(root, self._texture_resizer.process(root))
 
     def convert_stat_files(self, source_path: Path):
         print(f'{Fore.CYAN}[main] Converting Stats files:{Fore.RESET}')
