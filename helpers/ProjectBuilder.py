@@ -7,6 +7,7 @@ import xmltodict
 from colorama import Fore
 
 from helpers.LSXtoTBL import LSXconvert, as_list, strip_suffixes
+from helpers.Renamer import rewrite_text, find_names
 
 # Folders of the base game and its built-in modules, references to them must never be renamed
 VANILLA_FOLDERS = {'Shared', 'SharedDev', 'Gustav', 'GustavDev', 'GustavX', 'Honour', 'HonourX', 'Engine', 'Game',
@@ -15,6 +16,19 @@ VANILLA_FOLDERS = {'Shared', 'SharedDev', 'Gustav', 'GustavDev', 'GustavX', 'Hon
 BINARY_SUFFIXES = ['.lsf', '.lsb', '.lsbs', '.lsbc', '.lsfx']
 TEXT_SUFFIXES = ['.lsx', '.lsj']
 EDITOR_SUFFIXES = ['.tbl', '.stats', '.mei']
+SCAN_SUFFIXES = ['.lsx', '.lsj', '.txt', '.khn', '.xml', '.json', '.lua']
+# Files in which references to renamed spells are replaced: (folder run, suffixes), "*" matches any folder.
+# References anywhere else are only reported, they need a decision case by case.
+RENAME_RULES = [
+    (('public', '*', 'roottemplates'), ('.lsx',)),
+    (('public', '*', 'lists'), ('.lsx',)),
+    (('public', '*', 'progressions'), ('.lsx',)),
+    (('public', '*', 'shapeshift'), ('.lsx',)),
+    (('public', '*', 'stats', 'generated'), ('.txt',)),
+    (('scripts', 'thoth', 'helpers'), ('.khn',)),
+    (('story', 'rawfiles', 'goals'), ('.txt',)),
+    (('localization',), ('.xml',)),
+]
 
 
 def is_intermediate(file: Path) -> bool:
@@ -52,8 +66,12 @@ class ProjectBuilder:
             self.build(x, output_dir, prompt, skip_files)
 
     # Build a projects for use with Toolkit
-    def build(self, source_path: Path, output_dir: Path, prompt: bool = False, skip_files: set = None):
+    def build(self, source_path: Path, output_dir: Path, prompt: bool = False, skip_files: set = None,
+              renames: dict = None, report: list = None):
         skip_files = skip_files or set()
+        renames = renames or {}
+        unchanged = {}  # file -> [(line, old name)] references to renamed spells that were left as they are
+        replaced = {}  # file -> number of replaced references
         if not self.is_project(source_path):
             print(f'{Fore.YELLOW}[Project] {source_path.name} is not a valid project{Fore.RESET}')
             return False
@@ -107,8 +125,10 @@ class ProjectBuilder:
                     print(f'{Fore.YELLOW}[Project] {rel} collides with {sources[dest_rel]}, skipped{Fore.RESET}')
                     continue
                 sources[dest_rel] = rel
-                self.place_file(file, project_output_path / dest_rel, own_folders, project_name)
+                self.place_file(file, project_output_path / dest_rel, own_folders, project_name, rel, renames, unchanged, replaced)
 
+            report = list(report or []) + self.dedupe_localization(project_output_path / 'Mods' / project_name / 'Localization')
+            self.write_report(output_dir / f'{project_name}_Report.txt', report, renames, replaced, unchanged)
             print(f'{Fore.GREEN}[Project] Project {project_name} successfully created{Fore.RESET}')
             return True
         except Exception as e:
@@ -135,10 +155,7 @@ class ProjectBuilder:
 
         # Localization: keep the fixed file under the original name
         if file.name.endswith('_fix.xml'):
-            original = file.with_name(file.name[:-len('_fix.xml')] + '.xml')
-            if original.exists():
-                return None
-            parts[-1] = original.name
+            parts[-1] = file.name[:-len('_fix.xml')] + '.xml'
         elif file.suffix == '.xml' and file.with_name(file.stem + '_fix.xml').exists():
             return None  # replaced by its _fix.xml
         if parts[0] == 'Localization':
@@ -179,11 +196,42 @@ class ProjectBuilder:
         return re.sub(r'(value="|")Generated/(?!Public/)', rf'\1Generated/Public/{project_name}/', text)
     # endregion
 
-    def place_file(self, file: Path, dest: Path, own: list[str], project_name: str):
+    @staticmethod
+    def rename_allowed(rel: str) -> bool:
+        parts = [p.lower() for p in rel.split('/')]
+        dirs, suffix = parts[:-1], Path(parts[-1]).suffix
+        for run, suffixes in RENAME_RULES:
+            if suffix not in suffixes:
+                continue
+            for i in range(len(dirs) - len(run) + 1):
+                if all(r == '*' or dirs[i + j] == r for j, r in enumerate(run)):
+                    return True
+        return False
+
+    def update_text(self, data: str, file: Path, own, project_name, rel, renames, unchanged, replaced) -> str:
+        if file.suffix in TEXT_SUFFIXES:
+            data = self.rewrite_paths(data, own, project_name)
+        if renames:
+            if self.rename_allowed(rel):
+                data, count = rewrite_text(data, renames)
+                if count:
+                    replaced[rel] = count
+            else:
+                hits = find_names(data, renames.keys())
+                if hits:
+                    unchanged[rel] = hits
+        return data
+
+    def place_file(self, file: Path, dest: Path, own: list[str], project_name: str, rel: str = None,
+                   renames: dict = None, unchanged: dict = None, replaced: dict = None):
         dest.parent.mkdir(parents=True, exist_ok=True)
+        rel = rel or file.name
+        renames = renames or {}
+        unchanged = unchanged if unchanged is not None else {}
+        replaced = replaced if replaced is not None else {}
         if is_intermediate(file):
             data = file.read_text(encoding='utf-8')
-            rewritten = self.rewrite_paths(data, own, project_name)
+            rewritten = self.update_text(data, file, own, project_name, rel, renames, unchanged, replaced)
             binary = file.with_suffix('')
             if rewritten == data and binary.exists():
                 shutil.copy(binary, dest)  # untouched original binary
@@ -196,11 +244,70 @@ class ProjectBuilder:
                 tmp.unlink(missing_ok=True)
             return
 
-        if file.suffix in TEXT_SUFFIXES:
+        if file.suffix in TEXT_SUFFIXES or renames and file.suffix.lower() in SCAN_SUFFIXES:
             data = file.read_text(encoding='utf-8', errors='surrogateescape')
-            dest.write_text(self.rewrite_paths(data, own, project_name), encoding='utf-8', errors='surrogateescape')
+            dest.write_text(self.update_text(data, file, own, project_name, rel, renames, unchanged, replaced),
+                            encoding='utf-8', errors='surrogateescape')
             return
+        if renames and file.suffix.lower() in ('.osi', '.div'):
+            # Compiled Osiris can't be edited, only reported
+            content = file.read_bytes().decode('latin-1')
+            hits = [(0, name) for name in renames if re.search(rf'(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])', content)]
+            if hits:
+                unchanged[rel] = hits
         shutil.copy(file, dest)
+
+    @staticmethod
+    def dedupe_localization(localization: Path) -> list[str]:
+        """
+            Paks often ship leftover xml copies next to the .loca the game actually loads, the toolkit compiles
+            every xml of a language. Strings are kept once, preferring the ones that came from a .loca file.
+        """
+        report = []
+        if not localization.is_dir():
+            return report
+        for language in [d for d in localization.iterdir() if d.is_dir()]:
+            files = sorted(language.glob('*.xml'), key=lambda f: (not f.name.endswith('.loca.xml'), f.name.lower()))
+            seen = set()
+            for file in files:
+                try:
+                    with open(file, 'rb') as f:
+                        data = xmltodict.parse(f.read())
+                    content_list = data.get('contentList') or {}
+                    contents = as_list(content_list.get('content'))
+                except Exception:
+                    continue
+                kept = [c for c in contents if c.get('@contentuid') not in seen]
+                seen.update(c.get('@contentuid') for c in contents)
+                if len(kept) == len(contents):
+                    continue
+                if not kept:
+                    file.unlink()
+                    report.append(f'Localization {language.name}/{file.name} removed, all its strings already exist in other files')
+                    continue
+                data['contentList']['content'] = kept
+                with open(file, 'w', encoding='utf-8') as f:
+                    f.write(xmltodict.unparse(data, pretty=True, indent='  '))
+                report.append(f'Localization {language.name}/{file.name}: {len(contents) - len(kept)} strings that exist in other files removed')
+        return report
+
+    @staticmethod
+    def write_report(out: Path, report: list, renames: dict, replaced: dict, unchanged: dict):
+        lines = list(report)
+        if replaced:
+            lines += ['', 'References to renamed spells updated:'] + [f'  {rel}: {n}' for rel, n in sorted(replaced.items())]
+        if unchanged:
+            lines += ['', 'References to renamed spells that were NOT updated (check and update manually):']
+            for rel, hits in sorted(unchanged.items()):
+                for line, name in hits[:25]:
+                    where = f'{rel}:{line}' if line else f'{rel} (compiled)'
+                    lines.append(f'  {where}: "{name}" -> "{renames[name]}"')
+                if len(hits) > 25:
+                    lines.append(f'  {rel}: ... and {len(hits) - 25} more')
+        if not lines:
+            return
+        out.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        print(f'{Fore.YELLOW}[Project] Review the conversion report: {out}{Fore.RESET}')
 
     # region Metadata
     @staticmethod

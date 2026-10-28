@@ -7,6 +7,7 @@ import xmltodict
 from colorama import Fore
 
 from helpers.LSLibUtil import LSLibUtil
+from helpers.Renamer import rewrite_text
 
 
 def map_modifier_type(attribute_type: str) -> str:
@@ -202,10 +203,20 @@ class LSXconvert:
                 print(f'{Fore.YELLOW}[lsx] Duplicate UUID {key} in {definition["name"]}, keeping the last definition{Fore.RESET}')
             entry['objects'][key] = obj
 
-    def flush(self) -> list[str]:
-        """Write all collected tables. Returns written paths"""
+    def flush(self, renames_for=None) -> list[str]:
+        """
+            Write all collected tables. Returns written paths
+
+            :param renames_for: function returning the spell renames (old -> new) for an output path
+        """
         written = []
         for out, entry in self.pending.items():
+            renames = renames_for(out) if renames_for else {}
+            if renames:
+                for obj in entry['objects'].values():
+                    for field in obj['fields']['field']:
+                        if field['@type'] not in ('IdTableFieldDefinition', 'NameTableFieldDefinition') and field['@name'] != 'Icon'                                 and isinstance(field.get('@value'), str):
+                            field['@value'], _ = rewrite_text(field['@value'], renames)
             construct = {'stats': {'@stat_object_definition_id': entry['definition']['id'],
                                    'stat_objects': {'stat_object': list(entry['objects'].values())}}}
             self._write(construct, Path(out))

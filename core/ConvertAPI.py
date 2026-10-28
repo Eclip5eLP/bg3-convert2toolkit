@@ -9,6 +9,7 @@ from helpers.LSLibUtil import LSLibUtil
 from helpers.LSXtoTBL import LSXconvert, strip_suffixes
 from helpers.ProjectBuilder import ProjectBuilder, is_intermediate
 from helpers.Stats2kit import StatsConvert, is_stats_file, stats_root, SPELL_TYPES
+from helpers.UUIDFixer import UUIDFixer
 
 EXCLUSIONS = ['meta.lsx', 'metadata.lsf.lsx']
 
@@ -20,18 +21,23 @@ class ConvertAPI:
                  path_to_root: Path,
                  path_to_templates: Path,
                  lslib_util: LSLibUtil,
-                 compile_aux_db: bool = False):
+                 compile_aux_db: bool = False,
+                 user_prefix: str = '',
+                 replace_mismatched_prefixes: bool = False):
         self.path_to_root = path_to_root
         self.lslib_util = lslib_util
         self.src_bg3_path = src_bg3_path
         self._aux_db = self._get_auxiliary_db(src_bg3_path, compile_aux_db)
         self._db = self._get_db()
-        self._stats_converter = StatsConvert(self._db, self._aux_db, self.path_to_root)
+        self._stats_converter = StatsConvert(self._db, self._aux_db, self.path_to_root, user_prefix, replace_mismatched_prefixes)
+        self._uuid_fixer = UUIDFixer(self.lslib_util)
         self._lsx_converter = LSXconvert(self._db, self.lslib_util, self.path_to_root)
         self._locale_fixer = FixLocale()
         stats_categories = {name: d['category'] for name, d in self._db.get('Schema', {}).get('Stats', {}).items()}
         self._proj_builder = ProjectBuilder(path_to_templates, self._lsx_converter, stats_categories)
         self._skip_files = set()
+        self._renames = {}  # project root -> spell renames
+        self._reports = {}  # project root -> report lines
 
     #region Public functions
     def convert(self, source_path: Path, output_dir: Path, is_cli: bool = True):
@@ -47,7 +53,10 @@ class ConvertAPI:
         :param is_cli: Flag to indicate if caller is command line or GUI
         """
         self._skip_files = set()
+        self._renames = {}
+        self._reports = {}
         self.prepare_binaries(source_path)
+        self.fix_uuids(source_path)
         self.convert_stat_files(source_path)
         self.convert_lsx_files(source_path)
         self.fix_locales(source_path)
@@ -89,6 +98,12 @@ class ConvertAPI:
                 except Exception as e:
                     print(f'{Fore.YELLOW}[info] Could not read binary {file.name}: {e}{Fore.RESET}')
 
+    def fix_uuids(self, source_path: Path):
+        """Malformed UUIDs crash the toolkit while loading the project"""
+        print(f'{Fore.CYAN}[main] Checking UUIDs:{Fore.RESET}')
+        for root in self._project_roots(source_path):
+            self._report(root, self._uuid_fixer.fix(root))
+
     def convert_stat_files(self, source_path: Path):
         print(f'{Fore.CYAN}[main] Converting Stats files:{Fore.RESET}')
         groups = {}
@@ -100,11 +115,19 @@ class ConvertAPI:
                 continue
             if not is_stats_file(file):
                 continue
+            parts = file.relative_to(source_path).parts
+            if ('Public' in parts or 'Mods' in parts) and not self._in_stats_generated(parts):
+                # e.g. leftover working copies, they would duplicate the real entries
+                print(f'{Fore.YELLOW}[info] Skipped file: {file.name} (Reason: Outside Stats/Generated, not loaded by the game){Fore.RESET}')
+                continue
             groups.setdefault(stats_root(file), []).append(file)
 
         for out_dir, files in groups.items():
             try:
-                _, converted = self._stats_converter.convert_group(sorted(files), out_dir)
+                _, converted, renames = self._stats_converter.convert_group(sorted(files), out_dir)
+                root = self._project_root(out_dir, source_path)
+                self._renames.setdefault(root, {}).update(renames)
+                self._report(root, self._stats_converter.report)
                 # Content of oddly named files now lives in the canonical .stats files
                 self._skip_files.update(f for f in converted if not self._is_canonical_stats_file(f))
             except Exception as e:
@@ -116,7 +139,7 @@ class ConvertAPI:
             if self._in_output_project(file, source_path):
                 continue
             self._convert_internal(file, self._lsx_converter)
-        self._lsx_converter.flush()
+        self._lsx_converter.flush(lambda out: self._renames.get(self._project_root(Path(out), source_path), {}))
         self._skip_files.update(self._lsx_converter.non_canonical)
         self._lsx_converter.non_canonical = set()
 
@@ -140,7 +163,9 @@ class ConvertAPI:
             if dir_path.is_dir() and not dir_path in projects and self.is_project_dir(dir_path):
                 projects.append(dir_path)
 
-        self._proj_builder.build_all(projects, output_dir, is_cli, self._skip_files)
+        for project in projects:
+            self._proj_builder.build(project, output_dir, is_cli, self._skip_files,
+                                     self._renames.get(project, {}), self._reports.get(project, []))
 
     def refresh_aux_db(self):
         try:
@@ -151,6 +176,21 @@ class ConvertAPI:
     #endregion
 
     # region Private helper functions
+    def _project_roots(self, source_path: Path) -> list[Path]:
+        if self.is_project_dir(source_path):
+            return [source_path]
+        return [d for d in source_path.iterdir() if d.is_dir() and self.is_project_dir(d)]
+
+    def _project_root(self, path: Path, source_path: Path) -> Path:
+        if self.is_project_dir(source_path):
+            return source_path
+        rel = path.relative_to(source_path).parts
+        return source_path / rel[0] if rel else source_path
+
+    def _report(self, root: Path, lines: list[str]):
+        if lines:
+            self._reports.setdefault(root, []).extend(lines)
+
     @staticmethod
     def _in_output_project(file: Path, source_path: Path) -> bool:
         """Files of toolkit projects created by a previous run are never converted again"""
@@ -160,6 +200,10 @@ class ConvertAPI:
             if d.joinpath('Projects').is_dir() and d.joinpath('Editor').is_dir():
                 return True
         return False
+
+    @staticmethod
+    def _in_stats_generated(parts: tuple) -> bool:
+        return any(parts[i] == 'Stats' and parts[i + 1] == 'Generated' for i in range(len(parts) - 1))
 
     @staticmethod
     def _is_canonical_stats_file(file: Path) -> bool:

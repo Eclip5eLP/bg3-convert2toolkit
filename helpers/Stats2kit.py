@@ -6,6 +6,8 @@ from pathlib import Path
 import xmltodict
 from colorama import Fore
 
+from helpers.Renamer import rewrite_text
+
 SPELL_TYPES = ['Projectile', 'ProjectileStrike', 'Rush', 'Shout', 'Target', 'Teleportation', 'Throw', 'Wall', 'Zone']
 
 # `type "..."` of entries mapped to their stats definition
@@ -20,6 +22,9 @@ ENTRY_TYPES = {
     'ObjectCategories': 'ObjectCategoriesItemComboPreviewData',
     'CraftingStations': 'CraftingStationsItemComboPreviewData',
 }
+
+# Fields whose values are never treated as references to other entries
+NO_REFERENCE_FIELDS = ['UUID', 'Name', 'Using', 'Icon']
 
 # Data fields implied by the stats file the entry ends up in
 IMPLIED_FIELDS = ['SpellType', 'StatusType']
@@ -73,7 +78,11 @@ def is_guid(val) -> bool:
 
 class StatsConvert:
     # Init
-    def __init__(self, db=None, auxdb=None, root_path: Path = None):
+    def __init__(self, db=None, auxdb=None, root_path: Path = None, user_prefix: str = '', replace_mismatched_prefixes: bool = False):
+        self.user_prefix = user_prefix or ''
+        self.replace_mismatched_prefixes = replace_mismatched_prefixes
+        self.renames = {}
+        self.report = []
         self.db = db or {}
         self.auxdb = auxdb or {}
         self.root_path = root_path
@@ -222,7 +231,7 @@ class StatsConvert:
             Converts all stats txt files of one mod together, so entries are routed to the right
             definition no matter which file they were written in and parents resolve across files.
 
-            :return: (written .stats files, txt files that were fully converted)
+            :return: (written .stats files, txt files that were fully converted, spell renames old -> new)
         """
         entries = []
         partially = set()
@@ -246,6 +255,9 @@ class StatsConvert:
                 continue
             grouped.setdefault(definition, []).append(entry)
 
+        self.report = []
+        self.renames = self.spell_renames(grouped, entries)
+
         # Assign IDs first so parents resolve regardless of order and file
         uuids = {}
         for definition, items in grouped.items():
@@ -259,6 +271,7 @@ class StatsConvert:
             objects = self.build_objects(definition, items, uuids)
             if not objects:
                 continue
+            self.rename_references(objects)
             construct = {'stats': {'@stat_object_definition_id': self.db.get('Stats', {}).get(definition, self.schema[definition]['id']),
                                    'stat_objects': {'stat_object': objects}}}
             out = out_dir / f'{definition}.stats'
@@ -269,20 +282,88 @@ class StatsConvert:
             print(f'{Fore.GREEN}[info] Converted stats {definition} ({len(objects)} entries){Fore.RESET}')
 
         converted = [f for f in files if f not in partially and f not in skipped]
-        return written, converted
+        return written, converted, dict(self.renames)
 
     @staticmethod
     def game_name(entry: StatEntry, definition: str) -> str:
         return entry.name
 
-    @staticmethod
-    def editor_name(entry: StatEntry, definition: str) -> str:
-        # The toolkit prefixes spells with their type when exporting
+    def editor_name(self, entry: StatEntry, definition: str) -> str:
+        # The toolkit exports spells as <SpellType>_<Name>
+        name = self.renames.get(entry.name, entry.name)
         if definition in SPELL_TYPES:
-            if entry.name.startswith(f'{definition}_'):
-                return entry.name.removeprefix(f'{definition}_')
-            print(f'{Fore.YELLOW}[stats] Spell "{entry.name}" lacks the "{definition}_" prefix, the toolkit will export it as "{definition}_{entry.name}"{Fore.RESET}')
-        return entry.name
+            return name.removeprefix(f'{definition}_')
+        return name
+
+    @staticmethod
+    def spell_prefix(name: str) -> str | None:
+        return next((t for t in SPELL_TYPES if name.startswith(f'{t}_')), None)
+
+    def exported_spell_name(self, name: str, spell_type: str) -> str:
+        """The name the toolkit will export a spell with"""
+        # USER_Target_Name -> Target_USER_Name
+        if self.user_prefix and name.startswith(self.user_prefix):
+            rest = name[len(self.user_prefix):]
+            found = self.spell_prefix(rest)
+            if found:
+                name = f'{found}_{self.user_prefix}{rest[len(found) + 1:]}'
+        found = self.spell_prefix(name)
+        if found == spell_type:
+            return name
+        if found and self.replace_mismatched_prefixes:
+            return f'{spell_type}_{name[len(found) + 1:]}'
+        return f'{spell_type}_{name}'
+
+    def spell_renames(self, grouped: dict, entries: list) -> dict:
+        """
+            Spells without the prefix of their type get renamed by the toolkit, so every reference
+            to them has to be renamed as well. Ambiguous names are left alone and reported.
+        """
+        types_by_name = {}
+        for definition, items in grouped.items():
+            for e in items:
+                types_by_name.setdefault(e.name, set()).add(definition)
+        wanted = {}
+        for definition in SPELL_TYPES:
+            for e in grouped.get(definition, []):
+                new = self.exported_spell_name(e.name, definition)
+                if new != e.name:
+                    wanted.setdefault(e.name, set()).add(new)
+
+        renames = {}
+        targets = {}
+        for old, news in wanted.items():
+            if len(types_by_name.get(old, ())) > 1 or len(news) > 1:
+                self.warn(f'Spell "{old}" is not renamed, its name is used by several entries ({", ".join(sorted(types_by_name[old]))}). '
+                          f'The toolkit exports it as "{sorted(news)[0]}", references must be updated manually')
+                continue
+            new = news.pop()
+            if new in types_by_name:
+                self.warn(f'Spell "{old}" is not renamed, "{new}" already exists in the mod. References must be updated manually')
+                continue
+            targets.setdefault(new, []).append(old)
+            renames[old] = new
+        for new, olds in targets.items():
+            if len(olds) > 1:
+                self.warn(f'Spells {", ".join(olds)} would all be renamed to "{new}", none of them are renamed')
+                for old in olds:
+                    renames.pop(old, None)
+        for old, new in renames.items():
+            note = ' (overrides the existing spell of the same name!)' if new in self.auxdb else ''
+            self.warn(f'Spell "{old}" renamed to "{new}"{note}')
+        return renames
+
+    def warn(self, message: str):
+        self.report.append(message)
+        print(f'{Fore.YELLOW}[stats] {message}{Fore.RESET}')
+
+    def rename_references(self, objects: list):
+        if not self.renames:
+            return
+        for obj in objects:
+            for field in obj['fields']['field']:
+                if field['@name'] not in NO_REFERENCE_FIELDS and isinstance(field.get('@value'), str):
+                    field['@value'], _ = rewrite_text(field['@value'], self.renames)
 
     def build_objects(self, definition: str, items: list[StatEntry], uuids: dict) -> list:
         if definition == 'TreasureTable':
@@ -301,6 +382,15 @@ class StatsConvert:
             if entry.name in merged:
                 print(f'{Fore.YELLOW}[stats] "{entry.name}" is defined multiple times, keeping the last definition{Fore.RESET}')
             merged[entry.name] = entry
+
+        # Two entries the toolkit would export with the same name (e.g. "Foo" and "Target_Foo" in Target)
+        editor_names = {}
+        for name, entry in list(merged.items()):
+            key = self.editor_name(entry, definition)
+            if key in editor_names:
+                self.warn(f'"{editor_names[key]}" and "{name}" end up with the same name in the toolkit, keeping "{name}"')
+                merged.pop(editor_names[key])
+            editor_names[key] = name
 
         objects = []
         for entry in merged.values():

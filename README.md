@@ -268,6 +268,21 @@ Expected file names (note not all types may be supported currently)
   - 0 or 1 to compile additional UUIDs from Editor projects<br>(recommended to set to 0 after running the first time or when needing to recompile)
 - `cliMode`
   - true or false to run in cli mode or start gui 
+- `userPrefix` (optional)
+  - Your own prefix, e.g. `"SYR_"`: spells named `SYR_Target_Smite` become `Target_SYR_Smite` instead of `Target_SYR_Target_Smite`
+- `replaceMismatchedSpellPrefixes` (optional, default false)
+  - true: a Projectile spell named `Target_X` becomes `Projectile_X`. false: it becomes `Projectile_Target_X`
+
+
+---
+## Conversion report
+Next to every created project a `<Project>_Report.txt` is written when something needs your attention:
+- Malformed UUIDs that were repaired. The toolkit crashes while loading a project that contains one.
+  The intended UUID is restored when the same node/attribute uses it elsewhere in the mod, otherwise a new UUID is used everywhere the malformed one appears.
+- Spells that were renamed because the toolkit exports spells as `<SpellType>_<Name>`.
+  References are updated (whole names only, case-sensitive) in stats, tables, RootTemplates, SpellLists, Progressions,
+  Rulebooks, Osiris goals, khn scripts and localization. References in any other file, and in compiled Osiris
+  stories, are only listed in the report and need to be updated manually.
 
 
 ---
@@ -339,13 +354,18 @@ After a toolkit update run `py -m helpers.CompileDB "<path to Baldurs Gate 3>"` 
 
 ---
 ## Troubleshooting/Known Issues
-- The toolkit exports spells as `<SpellType>_<Name>`. Spells that don't use their type as prefix (e.g. a Target
-  spell called `MyMod_Fireball`) are renamed by the toolkit, the converter prints a warning for every such spell.
+- Spells are renamed to follow the toolkit's `<SpellType>_<Name>` naming, see the conversion report for references
+  that could not be updated automatically.
 - Comments of lsx tables can't be recovered, the game files don't contain them.
 - Story mods only ship compiled Osiris files, these are copied but can't be edited in the toolkit.
 - The game seems more relaxed than the toolkit in certain regards.  I observed while testing a case where a mod 
   defined multiple MultiEffectInfos in lsx with the **same** UUID.  The game seemed unconcerned, and the scripts
   were able to convert.  However, the toolkit MEI editor would crash unless I removed the duplicate.
+
+
+---
+## Credits
+- Spell renaming and UUID checks are based on [Syrchalis' Pre-Converter](https://github.com/Syrchalis/bg3-preconvert2toolkit)
 
 
 ---

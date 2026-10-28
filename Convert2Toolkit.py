@@ -19,6 +19,8 @@ if __name__ == "__main__":
 		bg3path = settings.get('bg3path', '')
 		compileAux = settings.get('compileAux', 1)
 		cli_mode = settings.get('cliMode', True)
+		user_prefix = settings.get('userPrefix', '')
+		replace_mismatched_prefixes = settings.get('replaceMismatchedSpellPrefixes', False)
 
 	# Handle command line args
 	parser = argparse.ArgumentParser(
@@ -66,7 +68,9 @@ if __name__ == "__main__":
 		path_to_root=path_to_root,
 		path_to_templates=path_to_templates,
 		lslib_util=lslib_util,
-		compile_aux_db=compileAux
+		compile_aux_db=compileAux,
+		user_prefix=user_prefix,
+		replace_mismatched_prefixes=replace_mismatched_prefixes
 	)
 
 	# Determine process command line vs GUI
