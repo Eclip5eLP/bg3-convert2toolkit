@@ -1,5 +1,6 @@
 import shutil
 import sys
+import traceback
 import uuid
 from pathlib import Path
 
@@ -114,15 +115,22 @@ class ConvertQThread(QThread):
         source_path: Path = Path(self.source_path_input).resolve()
         output_path: Path = Path(self.output_path_input).resolve()
 
-        if self.convert_api.is_pak(source_path):
-            output_tmp = output_path / f'tmp_{uuid.uuid4()}'
-            pak_tmp = output_tmp / source_path.stem
-            pak_tmp.mkdir(parents=True, exist_ok=True)
-            self.convert_api.unpack_file(source_path, pak_tmp)
-            self.convert_api.convert(output_tmp, output_path, False)
-            shutil.rmtree(str(output_tmp))
-        else:
-            self.convert_api.convert(source_path, output_path, False)
+        output_tmp = None
+        try:
+            if self.convert_api.is_pak(source_path):
+                output_tmp = output_path / f'tmp_{uuid.uuid4()}'
+                pak_tmp = output_tmp / source_path.stem
+                pak_tmp.mkdir(parents=True, exist_ok=True)
+                self.convert_api.unpack_file(source_path, pak_tmp)
+                self.convert_api.convert(output_tmp, output_path, False)
+            else:
+                self.convert_api.convert(source_path, output_path, False)
+        except Exception:
+            # exceptions inside a QThread are otherwise lost silently
+            traceback.print_exc()
+        finally:
+            if output_tmp is not None and output_tmp.exists():
+                shutil.rmtree(str(output_tmp), ignore_errors=True)
 
 
 # thread object to support compiling auxdb
@@ -133,7 +141,10 @@ class CompileQThread(QThread):
         self.convert_api: ConvertAPI = convert_api
 
     def run(self):
-        self.convert_api.refresh_aux_db()
+        try:
+            self.convert_api.refresh_aux_db()
+        except Exception:
+            traceback.print_exc()
 
 
 # timer used for delay before validating source/output fields

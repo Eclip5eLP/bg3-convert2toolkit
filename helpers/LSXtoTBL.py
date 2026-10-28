@@ -1,5 +1,5 @@
-import json
 import os
+import re
 import uuid
 from pathlib import Path
 
@@ -23,408 +23,401 @@ def map_modifier_type(attribute_type: str) -> str:
         return attribute_type
 
 
-class LSXconvert:
-    data = None
-    file = None
-    uuid = None
-    db = None
-    auxIDfix = None
-    lslib_util: LSLibUtil = None
-    root_path = None
+def as_list(val) -> list:
+    if val is None:
+        return []
+    return val if isinstance(val, list) else [val]
 
+
+def strip_suffixes(name: str) -> str:
+    # Due to unpacking some files get multiple suffixes (e.g. Progressions.lsf.lsx)
+    while Path(name).suffix.lower() in {'.lsx', '.lsf', '.lsb', '.lsbs', '.lsbc', '.lsfx'}:
+        name = Path(name).stem
+    return name
+
+
+def is_guid(val: str) -> bool:
+    return re.fullmatch(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', val or '') is not None
+
+
+class LSXconvert:
+    lslib_util: LSLibUtil = None
+
+    # Region ids of resources that the toolkit keeps as binary .lsf files
     lsf_types = ['Templates', 'SkeletonBank', 'MaterialBank', 'TextureBank', 'VisualBank', 'EffectBank', 'Tags',
                  'MultiEffectInfos', 'CharacterVisualBank', 'Material', 'MaterialPresetBank', 'PhysicsBank']
-
-    # with open('db.json', encoding="utf-8") as f:
-    #     backup_db = json.load(f)
-
-    lastName = ''
+    atlas_types = ['IconUVList', 'TextureAtlasInfo']
+    vfx_types = ['Effect', 'Dependencies']
 
     # Init
-    def __init__(self, db = None, lslib_util: LSLibUtil = None, root_path: Path = None):
+    def __init__(self, db=None, lslib_util: LSLibUtil = None, root_path: Path = None):
         self.file_type = None
+        self.file = None
+        self.data = None
+        self.uuid = None
         self.db = db
+        self.schema = (db or {}).get('Schema', {})
         self.root_path = root_path
         self.lslib_util = lslib_util
+        self.pending = {}  # out path -> {definition, objects (uuid -> stat_object)}
+        self.non_canonical = set()  # converted sources that don't live where the toolkit writes them
 
-    def setUUID(self, uuid = None):
+    def setUUID(self, uuid=None):
         self.uuid = uuid
 
     # Main call convert function
     def convert(self, file):
-        self.file = file
-        self.readxml(file)
-        converted_data, file_path, source_ext, dest_ext = self.convert_all()
-        return self.writexml(converted_data, file_path, source_ext, dest_ext)
-    
+        self.file = str(file)
+        self.readxml(self.file)
+        self.file_type = self.getDataType()
+
+        # Ignore Texture Atlas
+        if self.file_type in self.atlas_types:
+            print(f'{Fore.YELLOW}[info] Skipped file: {os.path.basename(self.file)} (Reason: Texture atlas doesnt need conversion){Fore.RESET}')
+            return False
+
+        # Convert VFX (lsfx.lsx to lsfx)
+        if self.file_type in self.vfx_types:
+            if self._needs_binary():
+                self.lsx2lsf(lsfx=True, verbose=False)
+            print(f'{Fore.YELLOW}[info] Kept {os.path.basename(self.file)} as lsfx (Reason: VFX to lsefx not yet supported){Fore.RESET}')
+            return False
+
+        # MultiEffectInfos get an additional .mei file for the toolkit editor
+        if self.file_type == 'MultiEffectInfos':
+            if self._needs_binary():
+                self.lsx2lsf(verbose=False)
+            out = Path(self.file).with_name(strip_suffixes(Path(self.file).name) + '.mei')
+            self._write(self.build_mei_file(), out)
+            print(f'{Fore.GREEN}[info] Converted {os.path.basename(self.file)} (Built .mei){Fore.RESET}')
+            return True
+
+        # Visual resources and templates stay binary
+        if self.file_type in self.lsf_types:
+            if self._needs_binary():
+                self.lsx2lsf(verbose=False)
+                print(f'{Fore.GREEN}[info] Converted {os.path.basename(self.file)} (Converted to LSF){Fore.RESET}')
+            return False
+
+        definition_key = self.get_definition_key()
+        if definition_key is None:
+            print(f'{Fore.YELLOW}[info] Skipped file: {os.path.basename(self.file)} (Reason: {self.file_type} is not a toolkit table){Fore.RESET}')
+            return False
+
+        self.convert_table(definition_key)
+        return True
+
     # Read data from xml file
     def readxml(self, file):
-        self.file = file
+        self.file = str(file)
         with open(file, 'r+b') as f:
             self.data = xmltodict.parse(f.read())
         return self.data
 
     # Write data to xml file
-    def writexml(self, data, file = None, source_ext = '.lsx', dest_ext = '.tbl'):
-        if file is None:
-            file = self.file
+    def writexml(self, data, file=None, source_ext='.lsx', dest_ext='.tbl'):
         if data is None:
             return False
-        if source_ext is None:
-            source_ext = '.lsx'
-        if dest_ext is None:
-            dest_ext = '.tbl'
-        out = file.replace(source_ext, dest_ext)
-        with open(out, 'w', encoding="utf-8") as f:
-            f.write(xmltodict.unparse(data, pretty=True, indent='  '))
+        file = Path(file if file is not None else self.file)
+        if file.suffix == source_ext:
+            file = file.with_suffix(dest_ext)
+        self._write(data, file)
         return True
 
-    # Convert function logic
-    def convert_all(self):
-        # Get data type
-        self.file_type = self.getDataType()
+    @staticmethod
+    def _write(data, out: Path):
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, 'w', encoding="utf-8") as f:
+            f.write(xmltodict.unparse(data, pretty=True, indent='  '))
 
-        # Ignore Texture Atlas
-        if self.file_type in ['IconUVList', 'TextureAtlasInfo']:
-            print(f'{Fore.YELLOW}[info] Skipped file: {os.path.basename(self.file)} (Reason: Texture atlas doesnt need conversion){Fore.WHITE}')
-            return None, None, None, None
+    # A binary only needs to be generated if the original binary wasn't kept next to its lsx
+    def _needs_binary(self) -> bool:
+        stem = strip_suffixes(Path(self.file).name)
+        return not any(Path(self.file).with_name(stem + ext).exists() for ext in ['.lsf', '.lsfx'])
 
-        # Convert VFX (lsfx.lsx to lsfx)
-        if self.file_type in ['Effect','Dependencies']:
-            print(f'{Fore.YELLOW}[info] Convert file to lsfx: {os.path.basename(self.file)} (Reason: VFX to lsefx not yet supported){Fore.WHITE}')
-            self.lsx2lsf(lsfx=True)
-            # TODO: add conversion to lsefx and return
-            return None, None, None, None
-
-        # Convert Visual Resource or Templates to LSF
-        if self.file_type in self.lsf_types:
-            self.lsx2lsf()
-            # Convert to .mei file
-            if self.file_type == 'MultiEffectInfos':
-                base_file = self.file.replace('.lsx', '')
-                if not base_file.endswith('.lsf'):
-                    base_file = base_file + '.lsf'
-                return self.build_mei_file(), base_file, '.lsf', '.mei'
-            return None, None, None, None
-
-        # Override uuid
-        if self.uuid is None:
-            nodeUUID = ''
+    def getDataType(self, file=None):
+        if file is not None:
+            self.readxml(file)
         else:
-            nodeUUID = self.db['LSX'].get(self.file_type, self.uuid)
-            if nodeUUID != self.uuid:
-                print(f"{Fore.YELLOW}[lsx] ID Override for {os.path.basename(self.file)}: {nodeUUID} ({self.data['save']['region'].get('@id', None)}){Fore.WHITE}")
+            file = self.file
+        fname = strip_suffixes(os.path.basename(file))
+        regions = as_list(self.data['save'].get('region'))
+        if not regions:
+            return fname
+        return regions[0].get('@id', fname)
 
-        construct = {'stats': {'@stat_object_definition_id': nodeUUID, 'stat_objects': {'stat_object': []}}}
+    # region Table conversion
+    def get_definition_key(self, file_type=None, file=None):
+        file_type = file_type or self.file_type
+        file = file or self.file
+        candidates = self.schema.get('TablesByRegion', {}).get(file_type, [])
+        if len(candidates) == 1:
+            return candidates[0]
+        stem = strip_suffixes(os.path.basename(file))
+        # Multiple definitions share a region (DefaultValues), pick by file name
+        for key in candidates:
+            if key.split('/')[-1] == stem:
+                return key
+        for key in candidates:
+            if stem.startswith(key.split('/')[-1]):
+                return key
+        return None
 
-        try: # Try adding recovered entries to auxiliary db
-            with open(self.root_path / 'auxdb_self_recovered.temp', encoding="utf-8") as f:
-                self.auxIDfix = json.load(f)
-        except Exception as e:
-            self.auxIDfix = {}
-
-        root = self.data['save']['region']['node']['children']['node']
-        for x in root: # loop every node in root
-            if isinstance(x, str): # root only contains 1 node
-                t = self.loop_elements(root)
-                construct['stats']['stat_objects']['stat_object'].append({'@is_substat': 'false', 'fields': {'field': t}})
+    def output_path(self, definition: dict, file=None) -> Path:
+        """Canonical location of the tbl, relative to the Public/<mod>/ folder the source lives in"""
+        file = Path(file or self.file)
+        parts = file.parts
+        root = file.parent
+        for i in range(len(parts) - 3, -1, -1):
+            if parts[i] == 'Public':
+                root = Path(*parts[:i + 2])
                 break
-            else: # construct xml node
-                t = self.loop_elements(x)
-            construct['stats']['stat_objects']['stat_object'].append({'@is_substat': 'false', 'fields': {'field': t}})
-        return construct, None, None, None
+        return root / definition['category'] / f"{definition['name']}.tbl"
 
-    # Loop all elements in node
-    def loop_elements(self, elem):
-        t = []
-        for akey, aval in elem.items():
-            t = self.loop_builder(t, akey, aval)
+    def convert_table(self, definition_key: str):
+        definition = self.schema['Tables'][definition_key]
+        objects = self.build_table_objects(definition)
+        out = self.output_path(definition)
 
-        if self.lastName == '':
-            self.lastName = self.gen_uuid()
-        if not self.node_has_entry(t, 'NameFS'):
-            t.append({'@name':'NameFS','@type':'FixedStringTableFieldDefinition','@value':self.lastName})
-        if not self.node_has_entry(t, 'Name'):
-            t.append({'@name':'Name','@type':'NameTableFieldDefinition','@value':self.lastName})
-        self.lastName = ''
-        return t
+        # The toolkit regenerates the lsx at its canonical location, others would load the same data twice
+        source = Path(self.file)
+        canonical_dir = out.with_suffix('') if definition.get('split') else out.parent
+        if source.parent != canonical_dir or not definition.get('split') and strip_suffixes(source.name) != definition['name']:
+            self.non_canonical.add(source)
 
-    def loop_builder(self, t, akey, aval, lnode=None):
-        if akey == 'attribute': # Add attribute to builder
-            for node in aval:
-                t.append(self.gen_dict(node))
-        elif akey == 'children': # Combine children and add to builder
-            builder = {}
-            if isinstance(aval['node'], list): # 1 layer
-                chk_node = aval['node']
-            elif not aval['node'].get('children', None) is None: # Multilayer
-                for xkey, xval in aval['node']['children'].items():
-                    for ax in xval:
-                        ax['@id'] = aval['node'].get('@id', None)
-                        if builder.get(ax['@id'], None) is None:
-                            builder[ax['@id']] = {'@name': ax['@id'], '@type': self.gen_dict_keytype(ax['@id']), '@value': f'{ax["attribute"]["@value"]}'}
-                        else:
-                            builder[ax['@id']]['@value'] = f'{builder[ax["@id"]]["@value"]};{ax["attribute"]["@value"]}'
-                    for ax, bx in builder.items():
-                        t.append(bx)
-                return t
-            else: # 1 layer but only one node
-                chk_node = [aval['node']]
-
-            for ax in chk_node:
-                if not ax.get('children', None) is None:
-                    t = self.loop_builder(t, ax['@id'], 'children', ax['children'])
-                    continue
-                if builder.get(ax['@id'], None) is None:
-                    tbl_type = self.gen_dict_keytype(ax['@id'])
-                    attribute_type, attribute_value = self.get_type_value(ax)
-
-                    if tbl_type == "ModifierTableFieldDefinition":
-                        attribute_type = map_modifier_type(attribute_type)
-                        builder[ax['@id']] = {'@name': ax['@id'], '@type': self.gen_dict_keytype(ax['@id']), 'modifier': {'@value': attribute_value, '@type': attribute_type}}
-                    elif tbl_type == "EnumerationListTableFieldDefinition":
-                        pass
-                    else:
-                        builder[ax['@id']] = {'@name': ax['@id'], '@type': self.gen_dict_keytype(ax['@id']), '@value': attribute_value}
-
-                else:
-                    builder[ax['@id']]['@value'] = f'{builder[ax["@id"]]["@value"]};{ax["attribute"]["@value"]}'
-            for ax, bx in builder.items():
-                t.append(bx)
-        elif self.file_type == 'Rulebook' and aval == 'children':
-            if akey == 'AbilityChanges':
-                abilities_data = self.node_get_entry(t, 'Abilities')
-
-                if not abilities_data:
-                    abilities_data = {'@name':'Abilities', '@type':self.gen_dict_keytype('Abilities'), 'value': {'modifier': []}}
-                    t.append(abilities_data)
-
-                attribute_type, attribute_value = self.get_type_value(lnode['node'])
-                attribute_type = map_modifier_type(attribute_type)
-                abilities_data['value']['modifier'].append({'@value': attribute_value, '@type': attribute_type})
-            else:
-                # :-(
-                if akey == 'ActionsCapabilities':
-                    akey = 'ActionCapabilities'
-
-                node_type = self.gen_dict_keytype(akey)
-                if isinstance(lnode['node'], list):
-                    items = lnode['node']
-                else:
-                    items = [lnode['node']]
-
-                value_list = []
-                for item in items:
-                    value_list.append(item['attribute']['@value'])
-
-                t.append({'@name':akey, '@type':node_type, '@enumeration_type_name':self.db['DataTypes']['EnumTypes'].get(akey), '@version': '1', '@value':";".join(value_list)})
-
-        return t
-
-    def get_type_value(self, attributes):
-        if isinstance(attributes["attribute"], list):
-            attributes = attributes["attribute"]
+        if definition.get('split'):
+            # One file per object (e.g. ApprovalRatings/Reactions/<uuid>.tbl)
+            for obj in objects:
+                obj_uuid = self._field_value(obj, 'UUID')
+                self._add_pending(out.with_suffix('') / f'{obj_uuid}.tbl', definition, [obj])
         else:
-            attributes = [attributes["attribute"]]
-        attribute_type = ""
-        attribute_value = ""
-        for attribute in attributes:
-            if attribute['@id'] == "type":
-                attribute_type = attribute['@value']
-            elif attribute['@id'] in ["Name", "Object", "value"]:
-                attribute_value = attribute['@value']
-        return attribute_type, attribute_value
+            self._add_pending(out, definition, objects)
+        print(f"{Fore.GREEN}[info] Converted {os.path.basename(self.file)} ({definition_key}, {len(objects)} entries){Fore.RESET}")
 
-    # Generate dict lsx node from xml node
-    def gen_dict(self, node):
-        fname, fext = os.path.splitext(os.path.basename(self.file))
+    def _add_pending(self, out: Path, definition: dict, objects: list):
+        entry = self.pending.setdefault(str(out), {'definition': definition, 'objects': {}})
+        for obj in objects:
+            key = self._field_value(obj, 'UUID') or self.gen_uuid()
+            if key in entry['objects']:
+                print(f'{Fore.YELLOW}[lsx] Duplicate UUID {key} in {definition["name"]}, keeping the last definition{Fore.RESET}')
+            entry['objects'][key] = obj
+
+    def flush(self) -> list[str]:
+        """Write all collected tables. Returns written paths"""
+        written = []
+        for out, entry in self.pending.items():
+            construct = {'stats': {'@stat_object_definition_id': entry['definition']['id'],
+                                   'stat_objects': {'stat_object': list(entry['objects'].values())}}}
+            self._write(construct, Path(out))
+            written.append(out)
+        self.pending = {}
+        return written
+
+    @staticmethod
+    def _field_value(obj, name):
+        for f in obj['fields']['field']:
+            if f['@name'] == name:
+                return f.get('@value')
+        return None
+
+    def build_table_objects(self, definition: dict) -> list:
+        regions = as_list(self.data['save'].get('region'))
+        region = next((r for r in regions if r.get('@id') == self.file_type), regions[0])
+        roots = as_list(region.get('node'))
+        nodes = []
+        for root in roots:
+            children = as_list((root.get('children') or {}).get('node'))
+            nodes.extend(n for n in children if n.get('@id') == definition['export_name'])
+            if not children and root.get('@id') == definition['export_name']:
+                nodes.append(root)
+
+        objects = []
+        used_names = set()
+        for i, node in enumerate(nodes):
+            fields = self.build_fields(definition, node, i, used_names)
+            objects.append({'@is_substat': 'false', 'fields': {'field': fields}})
+        return objects
+
+    def build_fields(self, definition: dict, node: dict, index: int, used_names: set) -> list:
+        attributes = {a['@id']: a for a in as_list(node.get('attribute'))}
+        children = {}
+        for child in as_list((node.get('children') or {}).get('node')):
+            children.setdefault(child['@id'], []).append(child)
+
+        fields = []
+        for fd in definition['fields']:
+            typ = fd['type']
+            if typ == 'NameTableFieldDefinition':
+                fields.append(self.build_name(fd, attributes, index, used_names))
+                continue
+            if typ == 'IdTableFieldDefinition':
+                value = attributes.get(fd['export_name'], {}).get('@value') or self.gen_uuid()
+                fields.append({'@name': fd['name'], '@type': typ, '@value': value})
+                continue
+            if typ == 'ModifierTableFieldDefinition':
+                field = self.build_modifier(fd, children)
+            elif typ == 'ModifierListTableFieldDefinition':
+                field = self.build_modifier_list(fd, children)
+            elif fd.get('item') or fd.get('category'):
+                field = self.build_list(fd, children)
+            else:
+                field = self.build_attribute(fd, attributes.get(fd['export_name']))
+            if field is not None:
+                fields.append(field)
+        return fields
+
+    def build_name(self, fd, attributes, index, used_names):
+        value = attributes.get(fd['export_name'], {}).get('@value', '')
+        # Internal names are only used by the editor and need to be unique
+        if fd.get('internal') == 'true' or not value:
+            base = value or 'New_Stat'
+            value = base if base not in used_names else f'{base}_{index}'
+            while value in used_names:
+                value = f'{value}_{index}'
+        used_names.add(value)
+        return {'@name': fd['name'], '@type': fd['type'], '@value': value}
+
+    def build_attribute(self, fd: dict, attribute: dict):
+        if attribute is None:
+            return None
+        typ = fd['type']
+        field = {'@name': fd['name'], '@type': typ}
+        if typ == 'TranslatedStringTableFieldDefinition':
+            handle = attribute.get('@handle')
+            if handle is None:
+                return None
+            field['@handle'] = handle
+            # Locale versions are reset to 1 by FixLocale
+            field['@version'] = '1'
+            return field
+        value = attribute.get('@value', '')
+        if typ in ('EnumerationTableFieldDefinition', 'EnumerationListTableFieldDefinition'):
+            return self.build_enum(fd, value)
+        if typ == 'FloatTableFieldDefinition' and attribute.get('@type') in ('double', 'float'):
+            value = self.format_float(value, attribute.get('@type'))
+        field['@value'] = value
+        return field
+
+    def build_enum(self, fd: dict, values):
+        enum_name = fd.get('enum', fd['name'])
+        # Tables store enumerations by index (the toolkit also reads labels), lsx files may use either
+        labels = {label: index for index, label in self.schema.get('Enums', {}).get(enum_name, {}).items()}
+        mapped = [labels.get(v, v) for value in as_list(values) for v in str(value).split(';') if v != '']
+        return {'@name': fd['name'], '@type': fd['type'], '@value': ';'.join(mapped),
+                '@enumeration_type_name': enum_name, '@version': '1'}
+
+    def build_list(self, fd: dict, children: dict):
+        nodes = []
+        if fd.get('category'):
+            for cat in children.get(fd['category'], []):
+                for child in as_list((cat.get('children') or {}).get('node')):
+                    if not fd.get('item') or child['@id'] == fd['item']:
+                        nodes.append(child)
+        else:
+            nodes = children.get(fd['item'], [])
+
+        values = []
+        for n in nodes:
+            attributes = {a['@id']: a.get('@value', '') for a in as_list(n.get('attribute'))}
+            if fd['type'] == 'ReactionObjectListTableFieldDefinition':
+                values.append(f"{attributes.get('id', '')},{attributes.get('value', '')}")
+            elif fd['export_name'] in attributes:
+                values.append(attributes[fd['export_name']])
+            elif 'Name' in attributes:
+                # Enumeration lists are stored as <node><attribute id="Name"/></node>
+                values.append(attributes['Name'])
+        if not values:
+            return None
+        if fd['type'] in ('EnumerationTableFieldDefinition', 'EnumerationListTableFieldDefinition'):
+            return self.build_enum(fd, values)
+        return {'@name': fd['name'], '@type': fd['type'], '@value': ';'.join(values)}
+
+    @staticmethod
+    def format_float(value: str, lsx_type: str) -> str:
+        # lsx floats carry precision noise (0.40000000000000002, -0.30000001)
         try:
-            ndict = {}
+            return ('%.7g' if lsx_type == 'float' else '%.15g') % float(value)
+        except ValueError:
+            return value
 
-            # Attach values to keys
-            for key, val in node.items():
-                if key == '@id':
-                    # Hardcoded lsx name fixes
-                    if self.file_type == 'DefaultValues':
-                        if val == 'TableUUID':
-                            val = 'ProgressionUUID'
-                        if val == 'OriginUUID':
-                            val = 'Origin'
-                        if val == 'Add' and fname != 'Spells':
-                            val = 'DefaultValues'
-                    if fname == 'ClassDescriptions' and val == 'ParentGuid':
-                        val = 'ParentUUID'
-                    if fname == 'Rulebook':
-                        # Larian please, I beg you...
-                        if val == 'ChangeScript':
-                            val = 'ScriptName'
+    @staticmethod
+    def _modifier(node):
+        attribute_type, attribute_value = '', ''
+        for a in as_list(node.get('attribute')):
+            if a['@id'] == 'type':
+                attribute_type = a['@value']
+            elif a['@id'] in ['Name', 'Object', 'value']:
+                attribute_value = a['@value']
+        return {'@value': attribute_value, '@type': map_modifier_type(attribute_type)}
 
-                    ndict['@name'] = val
-                    continue
-                if key == '@type':
-                    ndict[key] = self.gen_dict_keytype(ndict.get('@name', None), ndict.get('@name', None))
-                    continue
-                if key == '@value' and ndict.get('@type', None) == 'TranslatedStringTableFieldDefinition':
-                    ndict['@handle'] = val
-                    ndict['@version'] = '1'
-                    continue
+    def build_modifier(self, fd, children):
+        nodes = children.get(fd['export_name'], [])
+        if not nodes:
+            return None
+        return {'@name': fd['name'], '@type': fd['type'], 'modifier': self._modifier(nodes[0])}
 
-                # Enum specific fields
-                if ndict.get('@type', None) == 'EnumerationTableFieldDefinition' or ndict.get('@type', None) == 'EnumerationListTableFieldDefinition':
-                    ndict['@version'] = '1'
-                    ndict['@enumeration_type_name'] = self.db['DataTypes']['EnumTypes'].get(ndict.get('@name', None), ndict.get('@name', None))
-                    val = self.db['DataTypes']['EnumSubTypes'].get(ndict.get('@name', None), {})
-                    if isinstance(val, dict):
-                        ndict['@value'] = val.get(node['@value'], node['@value'])
-                    else:
-                        ndict['@value'] = node['@value']
-
-                if ndict.get(key, None) is None:
-                    if key == '@value' and ndict['@name'] == 'Name':
-                        self.lastName = val
-                    ndict[key] = val
-            return ndict
-        except Exception as e:
-            print(f'[lsx] Exception: {e}; Ignored')
-
-    # Translate lsx node type to tbl type
-    def gen_dict_keytype(self, key = None, val = None):
-        fname, fext = os.path.splitext(os.path.basename(self.file))
-        dtype = self.db['DataTypes'].get(key, '')
-
-        # Hardcoded lsx type fixes
-        if dtype == 'IntegerTableFieldDefinition' and fname == 'Progressions':
-            dtype = 'ByteTableFieldDefinition'
-        if fname == 'ProgressionDescriptions' and val == 'Type':
-            dtype = 'FixedStringTableFieldDefinition'
-        if (fname == 'Spells' or fname == 'Abilities' or fname == 'Passives' or fname == 'Skills'):
-            if val == 'SelectorId':
-                dtype = 'StringTableFieldDefinition'
-            if val == 'ClassUUID':
-                dtype = 'GuidTableFieldDefinition'
-        if self.file_type == 'CompanionPresets' and key == 'RootTemplate':
-            dtype = 'GuidTableFieldDefinition'
-        if self.file_type == 'Origins':
-            if key == 'ClassUUID':
-                dtype = 'GuidTableFieldDefinition'
-            if key == 'Unique':
-                dtype = 'BoolTableFieldDefinition'
-        if self.file_type == 'Rulebook' and key in ['Weight', 'Hp', 'TemporaryHp', 'Scale']:
-            dtype = 'ModifierTableFieldDefinition'
-        if self.file_type == 'Rulebook' and key in ['Abilities']:
-            dtype = 'ModifierListTableFieldDefinition'
-
-        return dtype
+    def build_modifier_list(self, fd, children):
+        nodes = children.get(fd.get('item') or fd['export_name'], [])
+        if not nodes:
+            return None
+        return {'@name': fd['name'], '@type': fd['type'], 'value': {'modifier': [self._modifier(n) for n in nodes]}}
+    # endregion
 
     def build_mei_file(self):
-        root = self.data['save']['region']['node']
+        root = as_list(self.data['save']['region'])[0]['node']
         uuid = ""
         name = ""
-        for attribute in root['attribute']:
+        for attribute in as_list(root.get('attribute')):
             if attribute['@id'] == "UUID":
                 uuid = attribute['@value']
             elif attribute['@id'] == "Name":
                 name = attribute['@value']
 
+        # Same layout the toolkit writes: EffectInfo elements directly below MultiEffectInfos
+        effects = [self.build_mei_effect(e) for e in as_list((root.get('children') or {}).get('node'))]
         construct = {'MultiEffectInfos': {'@UUID': uuid, '@OwnerUUID': "00000000-0000-0000-0000-000000000000",
-                                          '@Name': name, 'EffectInfos': {'EffectInfo': []}}}
-
-        if isinstance(root['children']['node'], list):
-            for effect_info in root['children']['node']:
-                construct['MultiEffectInfos']['EffectInfos']['EffectInfo'].append(self.build_mei_effect(effect_info))
-        else:
-            construct['MultiEffectInfos']['EffectInfos']['EffectInfo'].append(self.build_mei_effect(root['children']['node']))
-
+                                          '@Name': name}}
+        if effects:
+            construct['MultiEffectInfos']['EffectInfo'] = effects
         return construct
 
     def build_mei_effect(self, effect_info):
         mei_effect = {}
-        for attribute in effect_info['attribute']:
-            value = attribute['@value']
+        for attribute in as_list(effect_info.get('attribute')):
+            value = attribute.get('@value', '')
             if attribute['@type'] == "bool":
                 value = str(value).lower()
             mei_effect[f'@{attribute["@id"]}'] = value
-        if 'children' in effect_info:
-            if isinstance(effect_info['children']['node'], list):
-                for node in effect_info['children']['node']:
-                    multi_id = f'@{node["@id"]}'
-                    if multi_id not in mei_effect:
-                        mei_effect[multi_id] = node['attribute']['@value']
-                    else:
-                        mei_effect[multi_id] = ", ".join([mei_effect[multi_id], node['attribute']['@value']])
+        for node in as_list((effect_info.get('children') or {}).get('node')):
+            multi_id = f'@{node["@id"]}'
+            value = as_list(node.get('attribute'))[0].get('@value', '') if node.get('attribute') else ''
+            if multi_id not in mei_effect:
+                mei_effect[multi_id] = value
             else:
-                multi_id = f"@{effect_info['children']['node']['@id']}"
-                mei_effect[multi_id] = effect_info['children']['node']['attribute']['@value']
+                mei_effect[multi_id] = ", ".join([mei_effect[multi_id], value])
         return mei_effect
 
     # Check if name or file is of guid type
     def is_file_guid(self, file):
-        if len(file) == 36 and file[8:9:] == "-" and file[13:14:] == "-" and file[18:19:] == "-" and file[23:24:] == "-":
-            return True
-        return False
-
-    # Safe list get without crash
-    def list_get(self, l, idx, default):
-        try:
-            return l[idx]
-        except IndexError:
-            return default
+        return is_guid(file)
 
     def gen_uuid(self) -> str:
         return str(uuid.uuid4())
 
-    # Check if node contains element
-    def node_has_entry(self, node, entry):
-        try:
-            for x in node:
-                if x.get('@name', None) == entry:
-                    return True
-            return False
-        except Exception:
-            return False
-
-    # Get entry from node
-    def node_get_entry(self, node, entry):
-        try:
-            for x in node:
-                if x.get('@name', None) == entry:
-                    return x
-            return None
-        except Exception:
-            return None
-
-    def getDataType(self, file = None):
-        if not file is None:
-            self.readxml(file)
-        else:
-            file = self.file
-        fname, fext = os.path.splitext(os.path.basename(file))
-
-        # Get data type
-        if isinstance(self.data['save']['region'], list):
-            return self.data['save']['region'][0].get('@id', fname)
-        else:
-            return self.data['save']['region'].get('@id', fname)
-
     # Convert to LSF (Modified from BG3ModdingTools)
-    def lsx2lsf(self, file = None, verbose = True, lsfx = False):
+    def lsx2lsf(self, file=None, verbose=True, lsfx=False, output=None):
         if file is None:
             file = self.file
 
         file_path = Path(file)
-        trimmed_file_path = file_path
-        # Due to unpacking some files get multiple suffix, so trim duplicates
-        while trimmed_file_path.suffix in {'.lsf', '.lsx'}:
-            trimmed_file_path = trimmed_file_path.with_suffix('')
-        if lsfx:
-            output = trimmed_file_path.with_suffix(".lsfx")
-        else:
-            output = trimmed_file_path.with_suffix(".lsf")
+        if output is None:
+            output = file_path.with_name(strip_suffixes(file_path.name) + ('.lsfx' if lsfx else '.lsf'))
+        output = Path(output)
         if output.exists():
             os.remove(output)
 
         self.lslib_util.convert_file(file_path, output)
 
         if verbose:
-            print(f'{Fore.GREEN}[info] Converted {os.path.basename(self.file)} (Converted to LSF){Fore.RESET}')
+            print(f'{Fore.GREEN}[info] Converted {os.path.basename(file)} (Converted to LSF){Fore.RESET}')
         return True

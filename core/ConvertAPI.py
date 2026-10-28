@@ -6,12 +6,11 @@ from colorama import Fore
 from helpers.CompileDB import CompileDB
 from helpers.FixLocale import FixLocale
 from helpers.LSLibUtil import LSLibUtil
-from helpers.LSXtoTBL import LSXconvert
-from helpers.ProjectBuilder import ProjectBuilder
-from helpers.Stats2kit import StatsConvert
+from helpers.LSXtoTBL import LSXconvert, strip_suffixes
+from helpers.ProjectBuilder import ProjectBuilder, is_intermediate
+from helpers.Stats2kit import StatsConvert, is_stats_file, stats_root, SPELL_TYPES
 
 EXCLUSIONS = ['meta.lsx', 'metadata.lsf.lsx']
-FORCE_FAIL = ['SpellSet.txt']
 
 
 # Primary object for clients to call for conversion logic
@@ -30,7 +29,9 @@ class ConvertAPI:
         self._stats_converter = StatsConvert(self._db, self._aux_db, self.path_to_root)
         self._lsx_converter = LSXconvert(self._db, self.lslib_util, self.path_to_root)
         self._locale_fixer = FixLocale()
-        self._proj_builder = ProjectBuilder(path_to_templates, self._lsx_converter)
+        stats_categories = {name: d['category'] for name, d in self._db.get('Schema', {}).get('Stats', {}).items()}
+        self._proj_builder = ProjectBuilder(path_to_templates, self._lsx_converter, stats_categories)
+        self._skip_files = set()
 
     #region Public functions
     def convert(self, source_path: Path, output_dir: Path, is_cli: bool = True):
@@ -45,6 +46,8 @@ class ConvertAPI:
         :param output_dir: Location to output converted files
         :param is_cli: Flag to indicate if caller is command line or GUI
         """
+        self._skip_files = set()
+        self.prepare_binaries(source_path)
         self.convert_stat_files(source_path)
         self.convert_lsx_files(source_path)
         self.fix_locales(source_path)
@@ -52,13 +55,7 @@ class ConvertAPI:
 
     @staticmethod
     def is_project_dir(source_path: Path) -> bool:
-        if not source_path.exists() or not source_path.is_dir():
-            return False
-        structure = ['Public/','Mods/']
-        for s in structure:
-            if not source_path.joinpath(Path(s)).exists():
-                return False
-        return True
+        return ProjectBuilder.is_project(source_path)
 
     def is_valid_source(self, source_path: Path) -> bool:
         return (source_path is not None
@@ -69,7 +66,7 @@ class ConvertAPI:
     def is_pak(source_path: Path) -> bool:
         return (source_path is not None
                 and source_path.exists()
-                and source_path.suffix == '.pak')
+                and source_path.suffix.lower() == '.pak')
 
     def unpack_file(self, source_path: Path, output_path: Path):
         if not self.is_pak(source_path):
@@ -82,32 +79,51 @@ class ConvertAPI:
 
         self._unpack_internal(source_path, output_path)
 
+    def prepare_binaries(self, source_path: Path):
+        """Create an editable lsx next to every binary resource that doesn't have one yet"""
+        for file in list(source_path.rglob('*')):
+            if (file.is_file() and self.lslib_util.is_lsx_family(file.suffix)
+                    and not file.with_name(file.name + '.lsx').exists() and not self._in_output_project(file, source_path)):
+                try:
+                    self.lslib_util.convert_file(file, file.with_name(file.name + '.lsx'))
+                except Exception as e:
+                    print(f'{Fore.YELLOW}[info] Could not read binary {file.name}: {e}{Fore.RESET}')
+
     def convert_stat_files(self, source_path: Path):
         print(f'{Fore.CYAN}[main] Converting Stats files:{Fore.RESET}')
+        groups = {}
         for file in source_path.rglob('*.txt'):
-            if file.name in FORCE_FAIL:
-                print(f'{Fore.YELLOW}[info] Skipped file: {file.name} (Reason: Not yet supported){Fore.RESET}')
+            if self._in_output_project(file, source_path):
                 continue
-            elif file.full_match('**/Mods/*/Story/**'):
+            if 'Story' in file.relative_to(source_path).parts:
                 print(f'{Fore.YELLOW}[info] Skipped file: {file.name} (Reason: Osiris Script){Fore.RESET}')
                 continue
-            self._convert_internal(file, self._db['Stats'], self._stats_converter)
+            if not is_stats_file(file):
+                continue
+            groups.setdefault(stats_root(file), []).append(file)
+
+        for out_dir, files in groups.items():
+            try:
+                _, converted = self._stats_converter.convert_group(sorted(files), out_dir)
+                # Content of oddly named files now lives in the canonical .stats files
+                self._skip_files.update(f for f in converted if not self._is_canonical_stats_file(f))
+            except Exception as e:
+                print(f'{Fore.RED}[info] Failed to convert stats in {out_dir}:\n\tError: {e}{Fore.RESET}')
 
     def convert_lsx_files(self, source_path: Path):
         print(f'\n{Fore.CYAN}[main] Converting LSX files:{Fore.RESET}')
         for file in source_path.rglob('*.lsx'):
-            if file.name in FORCE_FAIL:
-                print(f'{Fore.YELLOW}[info] Skipped file: {file.name} (Reason: Not yet supported){Fore.RESET}')
+            if self._in_output_project(file, source_path):
                 continue
-            self._convert_internal(file, self._db['LSX'], self._lsx_converter)
+            self._convert_internal(file, self._lsx_converter)
+        self._lsx_converter.flush()
+        self._skip_files.update(self._lsx_converter.non_canonical)
+        self._lsx_converter.non_canonical = set()
 
     def fix_locales(self, source_path: Path):
         print(f'{Fore.CYAN}[main] Reviewing locale XML files:{Fore.RESET}')
         for file in source_path.rglob('*.xml'):
-            if file.name[-8::] == '_fix.xml':
-                continue
-            if file.name in FORCE_FAIL:
-                print(f'{Fore.YELLOW}[info] Skipped file: {file.name} (Reason: Not yet supported){Fore.RESET}')
+            if file.name.endswith('_fix.xml') or self._in_output_project(file, source_path):
                 continue
             self._locale_fixer.fix(file, self._lsx_converter)
 
@@ -119,17 +135,45 @@ class ConvertAPI:
             print(f'{Fore.YELLOW}[info] Skipping construct tk project: {source_path} (Reason: Not a valid project dir){Fore.RESET}')
             return
 
-        for dir_path in source_path.iterdir():
+        candidates = [source_path] if self.is_project_dir(source_path) else list(source_path.iterdir())
+        for dir_path in candidates:
             if dir_path.is_dir() and not dir_path in projects and self.is_project_dir(dir_path):
                 projects.append(dir_path)
 
-        self._proj_builder.build_all(projects, output_dir, is_cli)
+        self._proj_builder.build_all(projects, output_dir, is_cli, self._skip_files)
 
     def refresh_aux_db(self):
-        self._aux_db = self._build_aux_db(self.src_bg3_path)
+        try:
+            self._aux_db = self._build_aux_db(self.src_bg3_path)
+            self._stats_converter.auxdb = self._aux_db
+        except FileNotFoundError:
+            print(f'{Fore.RED}[db] Can\'t compile AuxDB: bg3.exe not found in "{self.src_bg3_path}/bin" (check bg3path in settings.json){Fore.RESET}')
     #endregion
 
     # region Private helper functions
+    @staticmethod
+    def _in_output_project(file: Path, source_path: Path) -> bool:
+        """Files of toolkit projects created by a previous run are never converted again"""
+        rel = file.relative_to(source_path).parts
+        for i in range(1, len(rel)):
+            d = source_path.joinpath(*rel[:i])
+            if d.joinpath('Projects').is_dir() and d.joinpath('Editor').is_dir():
+                return True
+        return False
+
+    @staticmethod
+    def _is_canonical_stats_file(file: Path) -> bool:
+        # The toolkit writes Public/<mod>/Stats/Generated[/Data]/<file>.txt
+        parts = file.parts
+        if 'Public' not in parts or 'Generated' not in parts:
+            return False
+        stem = file.stem
+        canonical = (stem in ['Armor', 'Character', 'Interrupt', 'Object', 'Passive', 'Weapon', 'Data', 'XPData',
+                              'CriticalHitTypes', 'Equipment', 'TreasureTable', 'SpellSet', 'ItemCombos',
+                              'ObjectCategoriesItemComboPreviewData', 'CraftingStationsItemComboPreviewData']
+                     or stem.startswith('Status_') or stem.removeprefix('Spell_') in SPELL_TYPES and stem.startswith('Spell_'))
+        return canonical
+
     @staticmethod
     def _is_file_guid(file: str) -> bool:
         return len(file) == 36 and file[8:9:] == "-" and file[13:14:] == "-" and file[18:19:] == "-" and file[23:24:] == "-"
@@ -139,63 +183,51 @@ class ConvertAPI:
             if compile_aux_db:
                 return self._build_aux_db(src_bg3_path)
             else:
-                print(f'{Fore.YELLOW}[config] bg3.exe found\n[db] Loading auxiliary ID Database...{Fore.RESET}')
+                print(f'{Fore.YELLOW}[db] Loading auxiliary ID Database...{Fore.RESET}')
                 with open(self.path_to_root / 'auxdb.json', encoding="utf-8") as aux_db_data:
                     return json.load(aux_db_data)
         except FileNotFoundError:
+            print(f'{Fore.YELLOW}[db] No auxiliary ID Database available, parents from other mods can\'t be recovered{Fore.RESET}')
             return {}
 
-    @staticmethod
-    def _build_aux_db(src_bg3_path: str):
+    def _build_aux_db(self, src_bg3_path: str):
         # Check if bg3 path valid
         if not Path(f"{src_bg3_path}/bin/bg3.exe").is_file():
             raise FileNotFoundError('')
 
-        compdb = CompileDB(src_bg3_path)
+        compdb = CompileDB(src_bg3_path, self.path_to_root)
         print(f'{Fore.YELLOW}[config] bg3.exe found\n[db] Compiling auxiliary ID Database...{Fore.RESET}')
         return compdb.compileAuxiliaryDB()
 
     def _get_db(self) -> dict:
         with open(self.path_to_root / 'db.json', encoding="utf-8") as db_data:
-            return json.load(db_data)
+            db = json.load(db_data)
+        if 'Schema' not in db:
+            print(f'{Fore.RED}[db] db.json has no toolkit schema, run CompileDB with your bg3 path to update it{Fore.RESET}')
+        return db
 
-    def _convert_internal(self, file: Path, db: dict, converter) -> None:
+    def _convert_internal(self, file: Path, converter) -> None:
         if file.name in EXCLUSIONS:
             return None
         try:
-            fuuid = db.get(file.name.split('.')[0].replace('Spell_', ''), None)
-            converter.setUUID(fuuid)
-            chk = converter.convert(str(file))
-            if chk:
-                if fuuid is None:
-                    print(f'{Fore.YELLOW}[info] Converted {file.name} (No UUID found: Incorrect filename){Fore.RESET}')
-                else:
-                    print(f'{Fore.GREEN}[info] Converted {file.name} (UUID: {fuuid}){Fore.RESET}')
+            converter.convert(str(file))
         except Exception as e:
-            if self._is_file_guid(file.name.split(".")[0]):
-                print(f'{Fore.YELLOW}[info] Skipped file: {file.name} (Reason: Cannot convert binary){Fore.WHITE}')
-            else:
-                print(f'{Fore.RED}[info] Failed to convert {file.name}:\n\tError: {e}\n\tFile: {file}{Fore.RESET}')
+            print(f'{Fore.RED}[info] Failed to convert {file.name}:\n\tError: {e}\n\tFile: {file}{Fore.RESET}')
         return None
 
     def _unpack_internal(self, source_file: Path, output_path: Path, verbose=True):
         # unpack file
         self.lslib_util.uncompress_package(source_file, output_path)
 
-        # convert binaries to lsx, loca to xml
+        # convert binaries to lsx (originals are kept), loca to xml
         file_list = [f for f in output_path.resolve().glob('**/*') if f.is_file()]
         for file in file_list:
-            converted = False
             resolved_file = file.resolve()
             if self.lslib_util.is_lsx_family(resolved_file.suffix):
                 self.lslib_util.convert_file(resolved_file, resolved_file.with_suffix(resolved_file.suffix + '.lsx'))
-                converted = True
             elif self.lslib_util.is_loca_type(resolved_file.suffix):
                 self.lslib_util.convert_loca_file(resolved_file, resolved_file.with_suffix(resolved_file.suffix + '.xml'))
-                converted = True
-
-            # if converted type, remove original file
-            if converted:
+                # the toolkit builds .loca files from the xml
                 file.unlink(True)
 
         if verbose:

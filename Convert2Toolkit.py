@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from core.ConvertAPI import ConvertAPI
@@ -9,8 +10,11 @@ from helpers.LSLibUtil import LSLibUtil
 
 # Main entry for converter script or exe
 if __name__ == "__main__":
+	# Files next to the exe (or the working dir when running the script) hold settings, db and the convert folder
+	path_to_root = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path('.').resolve()
+
 	# Load Settings
-	with open('settings.json', encoding="utf-8") as f:
+	with open(path_to_root / 'settings.json', encoding="utf-8") as f:
 		settings = json.load(f)
 		bg3path = settings.get('bg3path', '')
 		compileAux = settings.get('compileAux', 1)
@@ -48,7 +52,6 @@ if __name__ == "__main__":
 		compileAux = True
 
 	# Set up paths for file references (needed due to exe packing)
-	path_to_root = Path('.').resolve()
 	lib_path = Path(__file__).parent.resolve()
 	path_to_templates = lib_path / 'lib/templates'
 	path_to_lslib = lib_path / 'lib/LSLib'

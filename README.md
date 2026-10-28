@@ -275,17 +275,18 @@ Expected file names (note not all types may be supported currently)
 - Actual conversion logic is the same as CLI mode
 - Supports providing a source path and output path
 - Source path must be a directory or pak file
-  - Does not support converting multiple pak files at once
+  - Does not support converting multiple pak files at once (use CLI mode for that)
 - Output path must be a directory
 - `Compile AuxDB` button builds additional UUIDs from Editor projects like compileAux setting 
 
 
 ---
 ## Running with python
-run `pip install -r requirements.txt` to install the required libraries.
+Requires Python 3.10 or newer. Run `pip install -r requirements.txt` to install the required libraries.
 
 Put all files you want to convert into a folder named `convert` inside the root of the script.
-You can also drop an entire project into it.
+You can also drop an entire project or `.pak` files into it (paks are unpacked into a folder of the same name).
+Projects created by a previous run are recognized and not converted again.
 
 run `py Convert2Toolkit.py` to start conversion.
 - add `--cli` or `--gui` to override mode type set in settings.json
@@ -303,6 +304,13 @@ run `py Convert2Toolkit.py` to start conversion.
 
 
 ---
+## Updating db.json
+`db.json` contains the field definitions of the toolkit (`Schema`), read from
+`Data/Editor/Config/UuidObjects/TableDefinitions.sod` and `Data/Editor/Config/Stats/StatObjectDefinitions.sod`.
+After a toolkit update run `py -m helpers.CompileDB "<path to Baldurs Gate 3>"` to refresh it.
+
+
+---
 ## Building the exe
 - Make sure pyinstaller is installed: `pip install pyinstaller`
 - From project dir run: `pyinstaller.exe --noconfirm .\Convert2Toolkit.spec`
@@ -312,7 +320,15 @@ run `py Convert2Toolkit.py` to start conversion.
 ## Future Features
 - [ ] Add conversion for lsfx --> lsefx
 
-- [ ] Add conversion for SpellSets.txt
+- [X] Add conversion for SpellSet.txt, Equipment.txt, ItemCombos.txt and Data/XPData.txt
+
+- [X] Route stats entries by their type instead of the file name (any file name works)
+
+- [X] Merge multiple lsx files of the same table and place them where the toolkit expects them
+
+- [ ] Add conversion for BloodTypes, ItemTypes, ItemColor and ItemProgression txt (kept as txt for now)
+
+- [ ] Decompile compiled Osiris stories (story.div.osi) back into goal files
 
 - [X] Add conversion for Rulebooks.lsx
 
@@ -323,6 +339,10 @@ run `py Convert2Toolkit.py` to start conversion.
 
 ---
 ## Troubleshooting/Known Issues
+- The toolkit exports spells as `<SpellType>_<Name>`. Spells that don't use their type as prefix (e.g. a Target
+  spell called `MyMod_Fireball`) are renamed by the toolkit, the converter prints a warning for every such spell.
+- Comments of lsx tables can't be recovered, the game files don't contain them.
+- Story mods only ship compiled Osiris files, these are copied but can't be edited in the toolkit.
 - The game seems more relaxed than the toolkit in certain regards.  I observed while testing a case where a mod 
   defined multiple MultiEffectInfos in lsx with the **same** UUID.  The game seemed unconcerned, and the scripts
   were able to convert.  However, the toolkit MEI editor would crash unless I removed the duplicate.

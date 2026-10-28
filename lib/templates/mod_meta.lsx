@@ -14,13 +14,13 @@
                             <attribute id="PublishHandle" type="uint64" value="0"/>
                             <attribute id="UUID" type="guid" value="28ac9ce2-2aba-8cda-b3b5-6e922f71b6b8"/>
                             <attribute id="Version64" type="int64" value="145100779997082619"/>
-                        </node>
+                        </node>$DEPENDENCIES
                     </children>
                 </node>
                 <node id="ModuleInfo">
-                    <attribute id="Author" type="LSString" value="ConversionAuthor"/>
+                    <attribute id="Author" type="LSString" value="$MOD_AUTHOR"/>
                     <attribute id="CharacterCreationLevelName" type="FixedString" value=""/>
-                    <attribute id="Description" type="LSString" value="Conversion Description"/>
+                    <attribute id="Description" type="LSString" value="$MOD_DESCRIPTION"/>
                     <attribute id="FileSize" type="uint64" value="0"/>
                     <attribute id="Folder" type="LSString" value="$MOD_FOLDER"/>
                     <attribute id="LobbyLevelName" type="FixedString" value=""/>
@@ -32,7 +32,7 @@
                     <attribute id="PublishHandle" type="uint64" value="0"/>
                     <attribute id="StartupLevelName" type="FixedString" value=""/>
                     <attribute id="UUID" type="FixedString" value="$MOD_UUID"/>
-                    <attribute id="Version64" type="int64" value="36028797018963968"/>
+                    <attribute id="Version64" type="int64" value="$MOD_VERSION"/>
                     <children>
                         <node id="PublishVersion">
                             <attribute id="Version64" type="int64" value="144255927717549775"/>

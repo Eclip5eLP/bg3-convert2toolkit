@@ -3,58 +3,75 @@ import shutil
 import uuid
 from pathlib import Path
 
+import xmltodict
 from colorama import Fore
 
-from helpers.LSXtoTBL import LSXconvert
+from helpers.LSXtoTBL import LSXconvert, as_list, strip_suffixes
+
+# Folders of the base game and its built-in modules, references to them must never be renamed
+VANILLA_FOLDERS = {'Shared', 'SharedDev', 'Gustav', 'GustavDev', 'GustavX', 'Honour', 'HonourX', 'Engine', 'Game',
+                   'MainUI', 'ModBrowser', 'PhotoMode', 'CrossplayUI', 'DiceSet_01', 'DiceSet_02', 'DiceSet_03',
+                   'DiceSet_04', 'DiceSet_05', 'DiceSet_06'}
+BINARY_SUFFIXES = ['.lsf', '.lsb', '.lsbs', '.lsbc', '.lsfx']
+TEXT_SUFFIXES = ['.lsx', '.lsj']
+EDITOR_SUFFIXES = ['.tbl', '.stats', '.mei']
+
+
+def is_intermediate(file: Path) -> bool:
+    """lsx created while unpacking a binary (e.g. _merged.lsf.lsx)"""
+    return file.suffix == '.lsx' and Path(file.stem).suffix in BINARY_SUFFIXES
+
+
+def sanitize(name: str) -> str:
+    return ''.join(x for x in name if x.isalnum() or x in ['_', '-', '(', ')'])
 
 
 class ProjectBuilder:
-    data = None
     path_to_templates = None
 
     # Init
-    def __init__(self, path_to_templates: Path, conv_lsx: LSXconvert = None):
+    def __init__(self, path_to_templates: Path, conv_lsx: LSXconvert = None, stats_categories: dict = None):
         self.conv_lsx = conv_lsx
         self.path_to_templates = path_to_templates
+        self.stats_categories = stats_categories or {}
 
-    # Check if path is a workspace resembling a project
-    def is_project(self, dirs):
+    # Check if path is a workspace resembling a mod
+    @staticmethod
+    def is_project(dirs) -> bool:
         pdir = Path(dirs)
-        if not pdir.exists() or not pdir.is_dir():
+        if not pdir.is_dir() or not pdir.joinpath('Mods').is_dir():
             return False
-        structure = ['Public/','Mods/']
-        for s in structure:
-            if not Path(f'{dirs}/{s}').exists():
-                return False
-        return True
+        # Already converted toolkit projects are skipped (e.g. output of a previous run)
+        if pdir.joinpath('Projects').is_dir() and pdir.joinpath('Editor').is_dir():
+            return False
+        return any(pdir.glob('Mods/*/meta.lsx')) or pdir.joinpath('Public').is_dir()
 
     # Build all saved projects
-    def build_all(self, projects: list[Path], output_dir: Path, prompt: bool = False):
+    def build_all(self, projects: list[Path], output_dir: Path, prompt: bool = False, skip_files: set = None):
         for x in projects:
-            self.build(x, output_dir, prompt)
+            self.build(x, output_dir, prompt, skip_files)
 
     # Build a projects for use with Toolkit
-    def build(self, source_path: Path, output_dir: Path, prompt: bool = False):
-        project_root_name = source_path.name
+    def build(self, source_path: Path, output_dir: Path, prompt: bool = False, skip_files: set = None):
+        skip_files = skip_files or set()
         if not self.is_project(source_path):
-            print(f'{Fore.YELLOW}[Project] {project_root_name} is not a valid project{Fore.RESET}')
+            print(f'{Fore.YELLOW}[Project] {source_path.name} is not a valid project{Fore.RESET}')
             return False
 
-        # Vars
+        meta = self.read_meta(source_path)
+        project_root_name = sanitize(meta.get('Name', '')) or self.strip_uuid(source_path.name)
         project_uuid = self.gen_uuid()
-        project_name = ''.join(x for x in f'{project_root_name}_{project_uuid}' if x.isalnum() or x in ['_','-','(',')'])
 
         # Prompt user for input
         if prompt:
             print(f'{Fore.CYAN}[Project] Attempting to create Project \'{project_root_name}\'\nEnter Project name (type X to skip or leave empty to use default): {Fore.RESET}')
             name = input()
-            if name == 'X' or name == 'x': # Skip
+            if name == 'X' or name == 'x':  # Skip
                 return False
-            name = ''.join(x for x in name if x.isalnum() or x in ['_','-','(',')'])
+            name = sanitize(name)
             if not name == '':
-                project_name = f'{name}_{project_uuid}'
                 project_root_name = name
-
+        project_name = f'{project_root_name}_{project_uuid}'
         project_output_path = output_dir.joinpath(project_name)
 
         try:
@@ -71,76 +88,28 @@ class ProjectBuilder:
 
             for sub_dir in structure:
                 project_output_path.joinpath(sub_dir).mkdir(parents=True, exist_ok=True)
-            self.createMeta(project_output_path, project_name, project_root_name, project_uuid)
+            self.createMeta(project_output_path, project_name, project_root_name, project_uuid, meta)
 
-            # Copy all files to the correct location
-            for file in source_path.rglob('*'):
-                if file.is_dir():
+            own_folders = self.own_folders(source_path)
+            vanilla = sorted({f for root in ['Public', 'Mods', 'Generated/Public'] for f in self.folders(source_path / root)} & VANILLA_FOLDERS)
+            if vanilla:
+                print(f'{Fore.YELLOW}[Project] Overrides of base game folders kept as-is: {", ".join(vanilla)}{Fore.RESET}')
+
+            sources = {}
+            for file in sorted(source_path.rglob('*')):
+                if not file.is_file() or file in skip_files or file.name == 'meta.lsx' and file.parent.parent.name == 'Mods':
                     continue
-
-                output_file_dir = str(file.parent.relative_to(source_path).as_posix() + '/')
-
-                # Series of steps to convert output directory string
-                output_file_dir = re.sub(r'^Public/.*?/', f'Public/{project_name}/', output_file_dir)
-                output_file_dir = re.sub(r'^Generated/Public/.*?/', f'Generated/Public/{project_name}/', output_file_dir)
-                output_file_dir = re.sub(r'^Mods/.*?/', f'Mods/{project_name}/', output_file_dir)
-
-                # Change destination if table, stats, or mei file
-                if file.suffix == '.tbl' or file.suffix == '.stats' or file.suffix == '.mei':
-                    output_file_dir = re.sub(r'/Stats/Generated/(Data/)?', f'/Stats/', output_file_dir)
-                    output_file_dir = output_file_dir.replace(f'Public/{project_name}/', f'Editor/Mods/{project_name}/')
-                    output_file_dir = self.translate_structure(output_file_dir, file.name)
-
-                # Fix destination if generated
-                if 'Generated/' in output_file_dir and not 'Generated/Public/' in output_file_dir and not '/Stats/Generated/' in output_file_dir:
-                    output_file_dir = output_file_dir.replace('Generated/', f'Generated/Public/{project_name}/')
-
-                # Fix localization
-                if output_file_dir.startswith('Localization/'):
-                    output_file_dir = output_file_dir.replace('Localization/', f'Mods/{project_name}/Localization/')
-
-                new_output_path = project_output_path.joinpath(output_file_dir)
-                new_output_path.mkdir(parents=True, exist_ok=True)
-                new_output_file = new_output_path.joinpath(file.name)
-                new_output_file_str = str(new_output_file.as_posix())
-
-                if not new_output_file.exists() and file.exists():
-                    shutil.copy(str(file.as_posix()), new_output_file_str)
-
-                # Edit paths if lsf file and re-convert
-                try:
-                    file_type = self.conv_lsx.getDataType(new_output_file_str)
-                    if not file_type in self.conv_lsx.lsf_types and not file_type in ['IconUVList', 'TextureAtlasInfo']:
-                        continue # Ignore all non lsf files
-
-                    with open(new_output_file_str, 'r', encoding="utf-8") as f:
-                        data = f.read()
-
-                    # Visual Resource Generated Path
-                    if file_type in self.conv_lsx.lsf_types:
-                        try:
-                            loc = re.search(r'Generated/.*?/', data).group().split('/')
-                            if not loc[1] == 'Public':
-                                data = data.replace('Generated/', f'Generated/Public/{project_name}/')
-                            else:
-                                data = data.replace('Generated/Public/', f'Generated/Public/{project_name}/')
-                        except Exception as e:
-                            pass # Ignore outlier files
-                    # UI Resource Public Path
-                    data = re.sub(r'(?!.*Public/Shared/Assets/)Public/.*?/Assets/', f'Public/{project_name}/Assets/', data)
-
-                    with open(new_output_file_str, 'w', encoding="utf-8") as f:
-                        f.write(data)
-
-                    self.conv_lsx.lsx2lsf(new_output_file_str, False)
-                except Exception as e:
-                    continue # Failsafe
-
-            # File Cleanup
-            #TODO remove duplicate files, conversion leftovers or localization files
+                rel = file.relative_to(source_path).as_posix()
+                dest_rel = self.map_path(rel, file, own_folders, project_name)
+                if dest_rel is None:
+                    continue
+                if dest_rel in sources:
+                    print(f'{Fore.YELLOW}[Project] {rel} collides with {sources[dest_rel]}, skipped{Fore.RESET}')
+                    continue
+                sources[dest_rel] = rel
+                self.place_file(file, project_output_path / dest_rel, own_folders, project_name)
 
             print(f'{Fore.GREEN}[Project] Project {project_name} successfully created{Fore.RESET}')
-            #raise Exception('Cleanup')
             return True
         except Exception as e:
             # Failed (failsafe catch)
@@ -149,8 +118,116 @@ class ProjectBuilder:
                 shutil.rmtree(project_output_path)
             return False
 
+    # region Paths
+    @staticmethod
+    def folders(path: Path) -> list[str]:
+        return [p.name for p in path.iterdir() if p.is_dir()] if path.is_dir() else []
+
+    def own_folders(self, source_path: Path) -> list[str]:
+        names = set()
+        for root in ['Public', 'Mods', 'Generated/Public', 'Editor/Mods']:
+            names.update(self.folders(source_path / root))
+        # Longest first so nested names never replace a shorter prefix first
+        return sorted(names - VANILLA_FOLDERS, key=len, reverse=True)
+
+    def map_path(self, rel: str, file: Path, own: list[str], project_name: str) -> str | None:
+        parts = rel.split('/')
+
+        # Localization: keep the fixed file under the original name
+        if file.name.endswith('_fix.xml'):
+            original = file.with_name(file.name[:-len('_fix.xml')] + '.xml')
+            if original.exists():
+                return None
+            parts[-1] = original.name
+        elif file.suffix == '.xml' and file.with_name(file.stem + '_fix.xml').exists():
+            return None  # replaced by its _fix.xml
+        if parts[0] == 'Localization':
+            parts = ['Mods', project_name] + parts
+
+        # Binaries are produced from (or copied next to) their intermediate lsx
+        if is_intermediate(file):
+            parts[-1] = file.stem
+        elif file.suffix in BINARY_SUFFIXES and file.with_name(file.name + '.lsx').exists():
+            return None
+
+        if len(parts) > 2 and parts[0] in ('Public', 'Mods') and parts[1] in own:
+            parts[1] = project_name
+        elif len(parts) > 3 and parts[0] == 'Generated' and parts[1] == 'Public' and parts[2] in own:
+            parts[2] = project_name
+        elif len(parts) > 3 and parts[0] == 'Editor' and parts[1] == 'Mods' and parts[2] in own:
+            parts[2] = project_name
+        elif len(parts) > 1 and parts[0] == 'Generated' and parts[1] != 'Public':
+            parts = ['Generated', 'Public', project_name] + parts[1:]
+
+        # Editor files of the toolkit
+        if file.suffix in EDITOR_SUFFIXES and len(parts) > 2 and parts[0] == 'Public':
+            parts = ['Editor', 'Mods'] + parts[1:]
+            if file.suffix == '.stats':
+                # Stats/Generated[/Data]/X.stats -> Stats/<category>/X.stats
+                category = self.stats_categories.get(file.stem, 'Stats')
+                stats_index = parts.index('Stats') if 'Stats' in parts else 3
+                parts = parts[:stats_index] + ['Stats', category, parts[-1]]
+        return '/'.join(parts)
+
+    def rewrite_paths(self, text: str, own: list[str], project_name: str) -> str:
+        for folder in own:
+            if folder == project_name:
+                continue
+            text = text.replace(f'Public/{folder}/', f'Public/{project_name}/')
+            text = text.replace(f'Mods/{folder}/', f'Mods/{project_name}/')
+        # Old style assets directly in Generated/
+        return re.sub(r'(value="|")Generated/(?!Public/)', rf'\1Generated/Public/{project_name}/', text)
+    # endregion
+
+    def place_file(self, file: Path, dest: Path, own: list[str], project_name: str):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if is_intermediate(file):
+            data = file.read_text(encoding='utf-8')
+            rewritten = self.rewrite_paths(data, own, project_name)
+            binary = file.with_suffix('')
+            if rewritten == data and binary.exists():
+                shutil.copy(binary, dest)  # untouched original binary
+                return
+            tmp = dest.with_name(dest.name + '.tmp.lsx')
+            tmp.write_text(rewritten, encoding='utf-8')
+            try:
+                self.conv_lsx.lsx2lsf(tmp, verbose=False, output=dest)
+            finally:
+                tmp.unlink(missing_ok=True)
+            return
+
+        if file.suffix in TEXT_SUFFIXES:
+            data = file.read_text(encoding='utf-8', errors='surrogateescape')
+            dest.write_text(self.rewrite_paths(data, own, project_name), encoding='utf-8', errors='surrogateescape')
+            return
+        shutil.copy(file, dest)
+
+    # region Metadata
+    @staticmethod
+    def read_meta(source_path: Path) -> dict:
+        """Read ModuleInfo and dependencies of the source mod"""
+        info = {'dependencies': []}
+        metas = sorted(source_path.glob('Mods/*/meta.lsx'))
+        if not metas:
+            return info
+        try:
+            with open(metas[0], 'rb') as f:
+                data = xmltodict.parse(f.read())
+            root = as_list(data['save']['region'])[0]['node']
+            for child in as_list((root.get('children') or {}).get('node')):
+                if child['@id'] == 'ModuleInfo':
+                    for a in as_list(child.get('attribute')):
+                        info[a['@id']] = a.get('@value', '')
+                elif child['@id'] == 'Dependencies':
+                    for dep in as_list((child.get('children') or {}).get('node')):
+                        info['dependencies'].append({a['@id']: a for a in as_list(dep.get('attribute'))})
+        except Exception as e:
+            print(f'{Fore.YELLOW}[Project] Could not read {metas[0]}: {e}{Fore.RESET}')
+        return info
+
     # Create metadata
-    def createMeta(self, pdir, pname, pname_raw, pguid):
+    def createMeta(self, pdir, pname, pname_raw, pguid, meta: dict = None):
+        meta = meta or {}
 
         # Project Metadata
         with open(f'{self.path_to_templates}/project_meta.lsx', 'r', encoding="utf-8") as f:
@@ -167,18 +244,42 @@ class ProjectBuilder:
         with open(f'{self.path_to_templates}/mod_meta.lsx', 'r', encoding="utf-8") as f:
             data = f.read()
 
+        # Base game dependencies are managed by the toolkit, only carry over other mods
+        dependencies = ''
+        for dep in meta.get('dependencies', []):
+            folder = dep.get('Folder', {}).get('@value', '')
+            if folder in VANILLA_FOLDERS:
+                continue
+            dependencies += '\n                        <node id="ModuleShortDesc">'
+            for key in ['Folder', 'MD5', 'Name', 'PublishHandle', 'UUID', 'Version64']:
+                if key in dep:
+                    a = dep[key]
+                    dependencies += f'\n                            <attribute id="{key}" type="{a.get("@type", "LSString")}" value="{self.xmlesc(a.get("@value", ""))}"/>'
+            dependencies += '\n                        </node>'
+
+        data = data.replace('$DEPENDENCIES', dependencies)
         data = data.replace('$MOD_FOLDER', self.xmlesc(pname))
         data = data.replace('$MOD_NAME', self.xmlesc(pname_raw))
         data = data.replace('$MOD_UUID', pguid)
+        data = data.replace('$MOD_AUTHOR', self.xmlesc(meta.get('Author', '') or 'ConversionAuthor'))
+        data = data.replace('$MOD_DESCRIPTION', self.xmlesc(meta.get('Description', '') or 'Conversion Description'))
+        data = data.replace('$MOD_VERSION', meta.get('Version64', '') or '36028797018963968')
 
         with open(f'{pdir}/Mods/{pname}/meta.lsx', 'w', encoding="utf-8") as f:
             f.write(data)
 
         return True
+    # endregion
 
     # Generate a new UUID
     def gen_uuid(self) -> str:
         return str(uuid.uuid4())
+
+    @staticmethod
+    def strip_uuid(name: str) -> str:
+        # ModName_<uuid> or mod.io style modname_<partial uuid>-<id>
+        stripped = re.sub(r'_[0-9a-fA-F]{8}-[0-9a-zA-Z-]*$', '', name)
+        return sanitize(stripped) or sanitize(name)
 
     # Check if a given string is a valid GUID
     def is_guid(self, val):
@@ -196,63 +297,3 @@ class ProjectBuilder:
             '"': "&quot;",
         })
         return txt.translate(table)
-
-    # Translate lsx file structure to tbl
-    def translate_structure(self, dirs, file):
-        paths = {
-            "/Stats/Generated/Data/": "/Stats/",
-        }
-
-        files = {
-            "BloodTypes.stats": "/BloodTypes/",
-            "CriticalHitTypes.stats": "/BloodTypes/",
-            "Crimes.stats": "/Crimes/",
-            "Equipment.stats": "/Equipment/",
-            "Data.stats": "/ExtraData/",
-            "Requirements.stats": "/ExtraData/",
-            "XPData.stats": "/ExtraData/",
-            "ItemColor.stats": "/ItemColor/",
-            "CraftingStationsItemComboPreviewData.stats": "/ItemCombos/",
-            "ItemComboProperties.stats": "/ItemCombos/",
-            "ItemCombos.stats": "/ItemCombos/",
-            "ObjectCategoriesItemComboPreviewData.stats": "/ItemCombos/",
-            "ItemProgressionNames.stats": "/ItemProgression/",
-            "ItemProgressionVisuals.stats": "/ItemProgression/",
-            "ItemTypes.stats": "/ItemTypes/",
-            "Projectile.stats": "/SpellData/",
-            "ProjectileStrike.stats": "/SpellData/",
-            "Rush.stats": "/SpellData/",
-            "Shout.stats": "/SpellData/",
-            "SpellSet.stats": "/SpellData/",
-            "Target.stats": "/SpellData/",
-            "Teleportation.stats": "/SpellData/",
-            "Throw.stats": "/SpellData/",
-            "Wall.stats": "/SpellData/",
-            "Zone.stats": "/SpellData/",
-            "Armor.stats": "/Stats/",
-            "Character.stats": "/Stats/",
-            "Interrupt.stats": "/Stats/",
-            "Object.stats": "/Stats/",
-            "Passive.stats": "/Stats/",
-            "Weapon.stats": "/Stats/",
-            "Status_BOOST.stats": "/StatusData/",
-            "Status_DEACTIVATED.stats": "/StatusData/",
-            "Status_DOWNED.stats": "/StatusData/",
-            "Status_EFFECT.stats": "/StatusData/",
-            "Status_FEAR.stats": "/StatusData/",
-            "Status_HEAL.stats": "/StatusData/",
-            "Status_INCAPACITATED.stats": "/StatusData/",
-            "Status_INVISIBLE.stats": "/StatusData/",
-            "Status_KNOCKED_DOWN.stats": "/StatusData/",
-            "Status_POLYMORPHED.stats": "/StatusData/",
-            "Status_SNEAKING.stats": "/StatusData/",
-            "TreasureGroups.stats": "/TreasureTable/",
-            "TreasureTable.stats": "/TreasureTable/",
-        }
-
-        for key, val in paths.items():
-            dirs = dirs.replace(key, val)
-        for key, val in files.items():
-            if file == key:
-                dirs = dirs.replace(f'/Stats/', f'/Stats/{val}')
-        return dirs

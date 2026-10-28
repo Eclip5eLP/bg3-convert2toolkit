@@ -19,4 +19,13 @@ class ConvertCLI:
         cli_path = self.path_to_root / 'convert'
         if not cli_path.exists():
             cli_path.mkdir(parents=True, exist_ok=True)
+
+        # Unpack pak files into a folder of the same name (once)
+        for pak in cli_path.glob('*.pak'):
+            unpack_dir = cli_path / pak.stem
+            if unpack_dir.exists():
+                continue
+            unpack_dir.mkdir(parents=True)
+            self.convert_api.unpack_file(pak, unpack_dir)
+
         self.convert_api.convert(cli_path, cli_path, True)
